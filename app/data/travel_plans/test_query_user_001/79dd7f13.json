@@ -1,0 +1,46 @@
+{
+  "plan_id": "79dd7f13",
+  "user_id": "test_query_user_001",
+  "city": "上海",
+  "duration_days": 5,
+  "created_at": "2026-07-31T16:26:57.630384",
+  "attractions": [
+    "外滩",
+    "迪士尼",
+    "科技馆",
+    "海洋馆",
+    "东方明珠"
+  ],
+  "daily_itinerary": {
+    "Day 1": [
+      "外滩",
+      "南京路"
+    ],
+    "Day 2": [
+      "迪士尼乐园"
+    ],
+    "Day 3": [
+      "科技馆",
+      "海洋馆"
+    ],
+    "Day 4": [
+      "东方明珠",
+      "陆家嘴"
+    ],
+    "Day 5": [
+      "朱家角古镇"
+    ]
+  },
+  "preferences": [
+    "主题乐园",
+    "亲子游"
+  ],
+  "budget": {
+    "total": 3500,
+    "total_attractions": 800,
+    "total_hotels": 1200,
+    "total_meals": 900,
+    "total_transportation": 200
+  },
+  "notes": "测试计划 - 上海"
+}

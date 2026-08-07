@@ -1,0 +1,91 @@
+{
+  "plan_id": "3853ce85",
+  "user_id": "test_user_001",
+  "city": "上海",
+  "duration_days": 2,
+  "created_at": "2026-08-04T11:54:04.807131",
+  "attractions": [
+    "上海四行仓库抗战纪念馆",
+    "外白渡桥",
+    "武康路",
+    "黄浦江游览(金陵东路码头)",
+    "龙华寺",
+    "朱家角古镇景区"
+  ],
+  "daily_itinerary": {
+    "day1": [
+      "上海四行仓库抗战纪念馆",
+      "外白渡桥",
+      "武康路",
+      "黄浦江游览(金陵东路码头)"
+    ],
+    "day2": [
+      "龙华寺",
+      "朱家角古镇景区"
+    ]
+  },
+  "preferences": [
+    "历史文化"
+  ],
+  "budget": {
+    "per_day_breakdown": {
+      "day_1": {
+        "attractions": [
+          {
+            "name": "上海四行仓库抗战纪念馆",
+            "ticket_price": 0
+          },
+          {
+            "name": "外白渡桥",
+            "ticket_price": 0
+          },
+          {
+            "name": "武康路",
+            "ticket_price": 0
+          },
+          {
+            "name": "黄浦江游览(金陵东路码头)",
+            "ticket_price": 100
+          }
+        ]
+      },
+      "day_2": {
+        "attractions": [
+          {
+            "name": "龙华寺",
+            "ticket_price": 0
+          },
+          {
+            "name": "朱家角古镇景区",
+            "ticket_price": 0
+          }
+        ]
+      }
+    },
+    "attraction_tickets": {
+      "上海四行仓库抗战纪念馆": 0,
+      "外白渡桥": 0,
+      "武康路": 0,
+      "黄浦江游览(金陵东路码头)": 100,
+      "龙华寺": 0,
+      "朱家角古镇景区": 0
+    },
+    "total_attractions": 100,
+    "hotel_details": {
+      "nights": 1,
+      "price_per_night": 300
+    },
+    "total_hotels": 300,
+    "meal_details": {
+      "meals_per_day": 3,
+      "price_per_meal": 60,
+      "days": 2
+    },
+    "total_meals": 360,
+    "total_transportation": 978,
+    "total": 1738,
+    "currency": "CNY",
+    "people_count": 1
+  },
+  "notes": "2天上海旅行计划"
+}

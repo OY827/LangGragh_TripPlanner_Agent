@@ -1,0 +1,39 @@
+{
+  "plan_id": "8ca57b76",
+  "user_id": "test_query_user_001",
+  "city": "上海",
+  "duration_days": 3,
+  "created_at": "2026-07-31T16:26:57.629095",
+  "attractions": [
+    "外滩",
+    "豫园",
+    "南京路",
+    "陆家嘴"
+  ],
+  "daily_itinerary": {
+    "Day 1": [
+      "外滩观光",
+      "豫园游览"
+    ],
+    "Day 2": [
+      "南京路购物",
+      "陆家嘴金融区"
+    ],
+    "Day 3": [
+      "新天地",
+      "田子坊"
+    ]
+  },
+  "preferences": [
+    "历史文化",
+    "现代都市"
+  ],
+  "budget": {
+    "total": 1850,
+    "total_attractions": 200,
+    "total_hotels": 443,
+    "total_meals": 360,
+    "total_transportation": 100
+  },
+  "notes": "测试计划 - 上海"
+}

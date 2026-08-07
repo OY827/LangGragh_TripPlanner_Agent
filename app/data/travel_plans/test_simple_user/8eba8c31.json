@@ -1,0 +1,33 @@
+{
+  "plan_id": "8eba8c31",
+  "user_id": "test_simple_user",
+  "city": "北京",
+  "duration_days": 3,
+  "created_at": "2026-07-17T11:42:37.439314",
+  "attractions": [
+    "故宫",
+    "天安门",
+    "长城",
+    "颐和园",
+    "天坛",
+    "圆明园"
+  ],
+  "daily_itinerary": {
+    "day1": [
+      "故宫",
+      "天安门",
+      "长城"
+    ],
+    "day2": [
+      "颐和园",
+      "天坛",
+      "圆明园"
+    ],
+    "day3": []
+  },
+  "preferences": [
+    "历史文化"
+  ],
+  "budget": null,
+  "notes": "3天北京旅行计划"
+}

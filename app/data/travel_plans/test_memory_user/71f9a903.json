@@ -1,0 +1,27 @@
+{
+  "plan_id": "71f9a903",
+  "user_id": "test_memory_user",
+  "city": "北京",
+  "duration_days": 2,
+  "created_at": "2026-07-16T16:42:48.250933",
+  "attractions": [
+    "鸟巢",
+    "水立方",
+    "奥林匹克公园"
+  ],
+  "daily_itinerary": {
+    "day1": [
+      "鸟巢",
+      "水立方"
+    ],
+    "day2": [
+      "奥林匹克公园"
+    ]
+  },
+  "preferences": [
+    "现代建筑",
+    "自然风光"
+  ],
+  "budget": 1500,
+  "notes": "第二次北京之旅，避开已访问景点"
+}

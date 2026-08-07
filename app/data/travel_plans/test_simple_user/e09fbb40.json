@@ -1,0 +1,33 @@
+{
+  "plan_id": "e09fbb40",
+  "user_id": "test_simple_user",
+  "city": "北京",
+  "duration_days": 3,
+  "created_at": "2026-07-17T11:42:37.450727",
+  "attractions": [
+    "鸟巢",
+    "水立方",
+    "奥林匹克公园",
+    "故宫",
+    "景山公园",
+    "北海公园"
+  ],
+  "daily_itinerary": {
+    "day1": [
+      "鸟巢",
+      "水立方",
+      "奥林匹克公园"
+    ],
+    "day2": [
+      "故宫",
+      "景山公园",
+      "北海公园"
+    ],
+    "day3": []
+  },
+  "preferences": [
+    "历史文化"
+  ],
+  "budget": null,
+  "notes": "3天北京旅行计划"
+}

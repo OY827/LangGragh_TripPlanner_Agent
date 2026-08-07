@@ -1,0 +1,39 @@
+{
+  "plan_id": "85c986f1",
+  "user_id": "test_query_user_001",
+  "city": "成都",
+  "duration_days": 3,
+  "created_at": "2026-07-31T16:26:57.631612",
+  "attractions": [
+    "大熊猫基地",
+    "宽窄巷子",
+    "锦里古街",
+    "都江堰"
+  ],
+  "daily_itinerary": {
+    "Day 1": [
+      "大熊猫基地",
+      "宽窄巷子"
+    ],
+    "Day 2": [
+      "都江堰",
+      "青城山"
+    ],
+    "Day 3": [
+      "锦里古街",
+      "武侯祠"
+    ]
+  },
+  "preferences": [
+    "美食",
+    "文化体验"
+  ],
+  "budget": {
+    "total": 1500,
+    "total_attractions": 100,
+    "total_hotels": 450,
+    "total_meals": 450,
+    "total_transportation": 100
+  },
+  "notes": "测试计划 - 成都"
+}

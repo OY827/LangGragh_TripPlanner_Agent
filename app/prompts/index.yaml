@@ -1,0 +1,58 @@
+version: "1.0"
+agents:
+  attraction:
+    name: "景点搜索专家"
+    role: "搜索指定城市的景点信息"
+    tools: ["景点搜索"]
+    main_prompt: "agents/attraction.md"
+    skills: ["memory_skill"]
+    output_format: "text"
+
+  attraction_formatter:
+    name: "景点信息整理专家"
+    role: "整理景点搜索结果为清晰的推荐列表"
+    tools: []
+    main_prompt: "agents/attraction_formatter.md"
+    skills: []
+    output_format: "text"
+
+  weather:
+    name: "天气查询专家"
+    role: "查询城市天气信息"
+    tools: ["天气查询"]
+    main_prompt: "agents/weather.md"
+    skills: []
+    output_format: "text"
+
+  hotel:
+    name: "酒店推荐专家"
+    role: "推荐合适的酒店"
+    tools: ["酒店搜索"]
+    main_prompt: "agents/hotel.md"
+    skills: ["memory_skill"]
+    output_format: "text"
+
+  planner:
+    name: "行程规划专家"
+    role: "生成完整旅行计划"
+    tools: []
+    main_prompt: "agents/planner.md"
+    skills: ["memory_skill", "budget_skill", "weather_skill"]
+    output_format: "json"
+
+skills:
+  memory_skill:
+    description: "处理用户旅行记忆，避免推荐已访问景点"
+    file: "skills/memory_skill.md"
+
+  budget_skill:
+    description: "计算和展示旅行预算"
+    file: "skills/budget_skill.md"
+
+  weather_skill:
+    description: "整合天气信息到行程规划"
+    file: "skills/weather_skill.md"
+
+templates:
+  json_output: "templates/json_output.md"
+  tool_call: "templates/tool_call.md"
