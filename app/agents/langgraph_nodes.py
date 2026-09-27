@@ -58,6 +58,7 @@ class GraphNodes:
         
         self.prompt_manager = get_prompt_manager()
         self._agent_prompts = {}
+        self._hotel_agent = None
     
     def _get_agent_prompt(self, agent_name: str) -> str:
         """获取渐进披露式提示词（带缓存）"""
@@ -104,6 +105,11 @@ class GraphNodes:
         
         context_lines.append(f"\n## 景点信息")
         context_lines.append(attraction_response if attraction_response else "暂无景点信息")
+
+        guide_info = self._get_guide_reference(city, travel_days, preferences)
+        if guide_info:
+            context_lines.append(f"\n## 参考攻略")
+            context_lines.append(guide_info)
         
         context_lines.append(f"\n## 天气信息（weather_skill）")
         context_lines.append(weather_response if weather_response else "暂无天气信息")
@@ -117,6 +123,7 @@ class GraphNodes:
         
         context_lines.append(f"\n请根据以上信息，严格按照系统提示中的 JSON 格式要求生成完整的 {city} {travel_days} 天旅行计划。")
         context_lines.append("【强制约束】行程中的景点名称只能从上方「景点信息」候选中选择，禁止编造未列出的景点；请复制候选中的 visit_duration 与坐标。")
+        context_lines.append("【参考攻略】只用于片区串线与节奏；不得新增候选外地点；禁止采用攻略中的票价、开放时间、酒店报价。")
         
         user_message = "\n".join(context_lines)
         
@@ -124,6 +131,48 @@ class GraphNodes:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
+
+    def _get_guide_reference(
+        self,
+        city: str,
+        travel_days: int = 1,
+        preferences: Optional[List[str]] = None,
+        top_k: int = 3,
+        max_chars: int = 650,
+    ) -> str:
+        """从 travel_guides 取参考攻略，失败或无数据返回空串。"""
+        if not city:
+            return ""
+        try:
+            prefs = " ".join(preferences or [])
+            query = f"{city} {travel_days}天 {prefs} 旅行攻略 路线建议".strip()
+            hits = self.retriever.retrieve_guides(query=query, city=city, top_k=top_k)
+        except Exception as e:
+            print(f"  ⚠ 攻略检索跳过: {e}")
+            return ""
+        if not hits:
+            return ""
+        parts = [
+            "仅供片区串线、每日节奏、餐饮时段参考。"
+            "不得把下文出现但「景点信息」中没有的地点写入行程；"
+            "禁止采用其中的票价、开放时间、酒店报价。"
+        ]
+        for i, hit in enumerate(hits, 1):
+            meta = hit.get("metadata") or {}
+            title = meta.get("title") or f"攻略{i}"
+            section = meta.get("section") or meta.get("category") or "攻略"
+            source = meta.get("source") or ""
+            year = meta.get("source_year") or ""
+            header = f"{i}. [{section}] {title}"
+            extras = [x for x in (f"来源:{source}" if source else "", f"年份约{year}" if year else "") if x]
+            if extras:
+                header += "  (" + "，".join(extras) + ")"
+            snippet = (hit.get("content") or "").replace("\n", " ").strip()
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars] + "..."
+            parts.append(header)
+            parts.append(snippet)
+        return "\n".join(parts)
     
     def _build_attraction_messages(self, state: Dict[str, Any]) -> List[Dict[str, Any]]:
         """基于 md 模板构建景点结果整理消息（attraction_formatter）"""
@@ -450,17 +499,49 @@ class GraphNodes:
     
     # ==================== 酒店子图节点 ====================
     
+    def _get_hotel_agent(self):
+        """懒加载酒店推荐 ReAct Agent，保证 LangGraph 子图也走同一套工具。"""
+        if getattr(self, "_hotel_agent", None) is None:
+            from app.agents.react_agent import ReActAgent
+            from app.tools.agent_tools import get_hotel_tools
+
+            self._hotel_agent = ReActAgent(
+                name="酒店推荐专家",
+                tools=get_hotel_tools(),
+                llm=self.llm,
+                system_prompt=self._get_agent_prompt("hotel"),
+                max_iterations=3,
+                verbose=True,
+            )
+        return self._hotel_agent
+
     def search_hotels(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """搜索酒店"""
+        """酒店子图：由酒店推荐 Agent 调用 RollingGo「酒店搜索」。"""
         try:
             city = state.get("city", "")
             accommodation = state.get("accommodation", "经济型")
-            
+            start_date = state.get("start_date") or ""
+            travel_days = int(state.get("travel_days") or 1)
+            stay_nights = max(1, travel_days - 1)
+
+            query = (
+                f"请搜索{city}的{accommodation}酒店。\n"
+                f"搜索信息：\n"
+                f"- 城市：{city}\n"
+                f"- 住宿类型：{accommodation}\n"
+                f"- 入住日期：{start_date}\n"
+                f"- 住宿晚数：{stay_nights}\n\n"
+                "要求：必须调用 hotel_search 工具；参数带上 city、keywords、"
+                "check_in_date、stay_nights；只返回有价格的酒店。"
+            )
+            hotel_text = self._get_hotel_agent().run(query)
+            if hotel_text:
+                return {"hotel_response": hotel_text}
+
             results = self.amap_service.search_poi(
                 keywords=f"{accommodation}酒店",
                 city=city
             )
-            
             hotel_text = self._format_hotel_results(results)
             return {"hotel_response": hotel_text}
         except Exception as e:
@@ -512,8 +593,11 @@ class GraphNodes:
                 }
             
             visited = comparison.get("visited_attractions", [])
+            prefs = comparison.get("preferences") or []
             memory_info = f"用户之前去过{city}（{comparison.get('plan_count', 0)}次）\n"
             memory_info += f"已访问景点: {', '.join(visited)}\n"
+            if prefs:
+                memory_info += f"用户偏好: {', '.join(prefs)}\n"
             memory_info += f"请推荐不同的景点和路线"
             
             return {
@@ -746,7 +830,7 @@ class GraphNodes:
 
         try:
             # 初始化版本管理器
-            version_manager = VersionManager(use_redis=False)
+            version_manager = VersionManager(use_redis=True)
 
             # 如果没有session_id，创建新会话
             if not session_id:
@@ -859,10 +943,10 @@ class GraphNodes:
             # 初始化对话Agent
             dialog_agent = DialogAgent(
                 llm_provider="aliyun",
-                use_redis=False,
+                use_redis=True,
                 enable_rag=True,
                 enable_amap=True,
-                enable_memory=False
+                enable_memory=True
             )
 
             # 处理修改请求
@@ -875,7 +959,7 @@ class GraphNodes:
             new_plan = None
             if result.get("new_version_id"):
                 from app.agents.version_manager import VersionManager
-                version_manager = VersionManager(use_redis=False)
+                version_manager = VersionManager(use_redis=True)
                 new_version = version_manager.get_version(result["new_version_id"])
                 if new_version:
                     new_plan = new_version.plan_data

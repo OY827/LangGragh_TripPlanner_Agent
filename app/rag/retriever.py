@@ -1,6 +1,6 @@
-from typing import List, Dict, Optional, Union
+from typing import Any, List, Dict, Optional, Union
 from enum import Enum
-from .vector_store import QdrantVectorStore
+from .vector_store import get_vector_store, get_guide_vector_store
 
 
 class SearchType(Enum):
@@ -14,9 +14,31 @@ class SearchType(Enum):
 class KnowledgeRetriever:
     """知识检索器 - 支持多种检索策略"""
 
-    def __init__(self, vector_store: Optional[QdrantVectorStore] = None):
-        self.vector_store = vector_store or QdrantVectorStore()
+    def __init__(self, vector_store: Optional[Any] = None, guide_store: Optional[Any] = None):
+        self.vector_store = vector_store or get_vector_store()
+        self.guide_store = guide_store
         self.default_top_k = 5
+
+    def _get_guide_store(self):
+        if self.guide_store is None:
+            self.guide_store = get_guide_vector_store()
+        return self.guide_store
+
+    def retrieve_guides(
+        self,
+        query: str,
+        city: Optional[str] = None,
+        top_k: int = 5,
+        search_type: Union[str, SearchType] = "similarity",
+    ) -> List[Dict]:
+        """只查攻略 collection，不碰景点库。"""
+        filters = {"city": city} if city else None
+        store = self._get_guide_store()
+        if isinstance(search_type, str):
+            search_type = SearchType(search_type)
+        if search_type == SearchType.HYBRID:
+            return store.hybrid_search(query, filters, top_k)
+        return store.search(query, filters, top_k)
 
     def retrieve(
         self,

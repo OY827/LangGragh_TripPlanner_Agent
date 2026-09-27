@@ -1,4 +1,4 @@
-"""旅行记忆管理器 - 使用Redis保存、读取、对比旅行计划"""
+"""旅行记忆管理器 — 长期记忆默认本地 Chroma，测试可用文件后端。"""
 
 import json
 import uuid
@@ -52,44 +52,70 @@ class TravelPlan:
 
 
 class TravelMemoryManager:
-    def __init__(self, redis_host: str = None, redis_port: int = None, 
-                 redis_password: str = None, use_redis: bool = True):
-        self.use_redis = use_redis
-        
-        if use_redis and redis:
+    def __init__(
+        self,
+        redis_host: str = None,
+        redis_port: int = None,
+        redis_password: str = None,
+        use_redis: bool = None,
+        backend: str = None,
+        embeddings=None,
+        persist_directory: str = None,
+    ):
+        """
+        backend:
+          - chroma: 用户长期记忆（默认）
+          - file: 本地 JSON，给单测 / 无 embedding 环境
+          - redis: 旧后端，仅显式指定时使用
+        use_redis=False 仍映射到 file，兼容现有测试。
+        """
+        self.client = None
+        self._chroma = None
+        if backend is None:
+            if use_redis is False:
+                backend = "file"
+            else:
+                backend = os.getenv("USER_MEMORY_BACKEND", "chroma")
+        self.backend = (backend or "chroma").lower()
+
+        if self.backend == "chroma":
+            try:
+                from app.memory.chroma_memory import ChromaUserMemory
+                self._chroma = ChromaUserMemory(
+                    persist_directory=persist_directory,
+                    embeddings=embeddings,
+                )
+                self.use_redis = False
+                return
+            except Exception as e:
+                print(f"Chroma 长期记忆初始化失败，回退到本地文件: {e}")
+                self.backend = "file"
+
+        if self.backend == "redis" and redis:
             if load_dotenv:
                 load_dotenv()
-            
             host = redis_host or os.getenv("REDIS_HOST", "localhost")
             port = redis_port or int(os.getenv("REDIS_PORT", 6379))
             password = redis_password or os.getenv("REDIS_PASSWORD", "")
-            
             try:
-                if password:
-                    self.client = Redis(
-                        host=host,
-                        port=port,
-                        password=password,
-                        decode_responses=True,
-                        socket_timeout=10
-                    )
-                else:
-                    self.client = Redis(
-                        host=host,
-                        port=port,
-                        decode_responses=True,
-                        socket_timeout=10
-                    )
+                self.client = Redis(
+                    host=host,
+                    port=port,
+                    password=password or None,
+                    decode_responses=True,
+                    socket_timeout=10,
+                )
                 self.client.ping()
+                self.use_redis = True
+                return
             except Exception as e:
                 print(f"Redis连接失败，回退到本地文件存储: {e}")
-                self.use_redis = False
-                self.storage_path = "app/data/travel_plans"
-                os.makedirs(self.storage_path, exist_ok=True)
-        else:
-            self.use_redis = False
-            self.storage_path = "app/data/travel_plans"
-            os.makedirs(self.storage_path, exist_ok=True)
+                self.backend = "file"
+
+        self.use_redis = False
+        self.backend = "file"
+        self.storage_path = "app/data/travel_plans"
+        os.makedirs(self.storage_path, exist_ok=True)
 
     def _get_user_key(self, user_id: str) -> str:
         return f"travel:user:{user_id}:plans"
@@ -126,6 +152,20 @@ class TravelMemoryManager:
             notes=notes
         )
 
+        if self._chroma:
+            return self._chroma.save_plan(
+                user_id=user_id,
+                city=city,
+                duration_days=duration_days,
+                attractions=attractions,
+                daily_itinerary=daily_itinerary,
+                preferences=preferences or [],
+                budget=budget,
+                notes=notes,
+                plan_id=plan_id,
+                created_at=plan.created_at,
+            )
+
         if self.use_redis:
             plan_data = json.dumps(plan.to_dict(), ensure_ascii=False)
             
@@ -146,6 +186,9 @@ class TravelMemoryManager:
         return plan_id
 
     def get_plan(self, user_id: str, plan_id: str) -> Optional[TravelPlan]:
+        if self._chroma:
+            data = self._chroma.get_plan(user_id, plan_id)
+            return TravelPlan.from_dict(data) if data else None
         if self.use_redis:
             plan_data = self.client.get(self._get_plan_key(user_id, plan_id))
             if plan_data:
@@ -162,6 +205,8 @@ class TravelMemoryManager:
                 return TravelPlan.from_dict(data)
 
     def get_user_plans(self, user_id: str) -> List[TravelPlan]:
+        if self._chroma:
+            return [TravelPlan.from_dict(item) for item in self._chroma.get_user_plans(user_id)]
         if self.use_redis:
             plan_ids = self.client.lrange(self._get_user_key(user_id), 0, -1)
             plans = []
@@ -186,6 +231,8 @@ class TravelMemoryManager:
             return plans
 
     def get_user_plans_by_city(self, user_id: str, city: str) -> List[TravelPlan]:
+        if self._chroma:
+            return [TravelPlan.from_dict(item) for item in self._chroma.get_user_plans_by_city(user_id, city)]
         if self.use_redis:
             plan_ids = self.client.lrange(self._get_city_key(user_id, city), 0, -1)
             plans = []
@@ -204,6 +251,8 @@ class TravelMemoryManager:
         return len(plans) > 0
 
     def get_visited_attractions(self, user_id: str, city: str) -> List[str]:
+        if self._chroma:
+            return self._chroma.get_visited_attractions(user_id, city)
         visited = set()
         plans = self.get_user_plans_by_city(user_id, city)
         
@@ -212,7 +261,32 @@ class TravelMemoryManager:
         
         return sorted(list(visited))
 
+    def get_preferences(self, user_id: str, city: str = "") -> List[str]:
+        if self._chroma:
+            return self._chroma.get_preferences(user_id, city)
+        prefs = []
+        seen = set()
+        plans = self.get_user_plans_by_city(user_id, city) if city else self.get_user_plans(user_id)
+        for plan in plans:
+            for item in plan.preferences or []:
+                if item and item not in seen:
+                    seen.add(item)
+                    prefs.append(item)
+        return prefs
+
+    def add_preference(self, user_id: str, preference: str, city: str = "") -> str:
+        if self._chroma:
+            return self._chroma.add_preference(user_id, preference, city)
+        return ""
+
+    def search_semantic(self, user_id: str, query: str, k: int = 5, memory_type: str = None) -> List[Dict[str, Any]]:
+        if self._chroma:
+            return self._chroma.search(user_id, query, k=k, memory_type=memory_type)
+        return []
+
     def compare_plans(self, user_id: str, city: str) -> Dict[str, Any]:
+        if self._chroma:
+            return self._chroma.compare_plans(user_id, city)
         plans = self.get_user_plans_by_city(user_id, city)
         
         if len(plans) == 0:
@@ -235,6 +309,8 @@ class TravelMemoryManager:
         }
 
     def delete_plan(self, user_id: str, plan_id: str) -> bool:
+        if self._chroma:
+            return self._chroma.delete_plan(user_id, plan_id)
         if self.use_redis:
             plan = self.get_plan(user_id, plan_id)
             if not plan:
@@ -256,6 +332,8 @@ class TravelMemoryManager:
             return False
 
     def clear_user_plans(self, user_id: str) -> int:
+        if self._chroma:
+            return self._chroma.clear_user_plans(user_id)
         if self.use_redis:
             plan_ids = self.client.lrange(self._get_user_key(user_id), 0, -1)
             count = 0
@@ -273,6 +351,8 @@ class TravelMemoryManager:
             return count
 
     def get_storage_type(self) -> str:
+        if self._chroma:
+            return "chroma"
         return "redis" if self.use_redis else "file"
 
     def _parse_datetime(self, date_str: str) -> Optional[datetime]:

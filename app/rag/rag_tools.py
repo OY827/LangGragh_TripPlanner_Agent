@@ -73,8 +73,7 @@ class RAGQueryTool(BaseTool):
         if retriever:
             self.retriever = retriever
         else:
-            from app.rag.vector_store import QdrantVectorStore
-            self.retriever = KnowledgeRetriever(QdrantVectorStore())
+            self.retriever = KnowledgeRetriever()
 
     def _run(self, query: str, top_k: int = 3, city: Optional[str] = None) -> str:
         """执行RAG查询"""
@@ -144,8 +143,7 @@ class AttractionRecommendTool(BaseTool):
         if retriever:
             self.retriever = retriever
         else:
-            from app.rag.vector_store import QdrantVectorStore
-            self.retriever = KnowledgeRetriever(QdrantVectorStore())
+            self.retriever = KnowledgeRetriever()
         
         if generator:
             self.generator = generator
@@ -212,8 +210,7 @@ class AttractionDetailTool(BaseTool):
         if retriever:
             self.retriever = retriever
         else:
-            from app.rag.vector_store import QdrantVectorStore
-            self.retriever = KnowledgeRetriever(QdrantVectorStore())
+            self.retriever = KnowledgeRetriever()
 
     def _run(self, attraction_name: str, city: str) -> str:
         """查询景点详情"""
@@ -290,17 +287,15 @@ class GuideRecommendTool(BaseTool):
         if retriever:
             self.retriever = retriever
         else:
-            from app.rag.vector_store import QdrantVectorStore
-            self.retriever = KnowledgeRetriever(QdrantVectorStore())
+            self.retriever = KnowledgeRetriever()
 
     def _run(self, city: str, theme: str = "通用") -> str:
         """推荐旅行攻略"""
         try:
-            # 检索攻略
-            results = self.retriever.retrieve(
+            results = self.retriever.retrieve_guides(
                 query=f"{city} {theme} 旅行攻略 路线建议",
-                filters={"city": city},
-                top_k=3
+                city=city,
+                top_k=3,
             )
 
             if not results:

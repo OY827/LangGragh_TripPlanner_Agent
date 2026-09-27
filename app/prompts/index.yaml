@@ -3,7 +3,7 @@ agents:
   attraction:
     name: "景点搜索专家"
     role: "搜索指定城市的景点信息"
-    tools: ["景点搜索"]
+    tools: ["amap_attraction_search", "rag_attraction_search", "smart_attraction_search"]
     main_prompt: "agents/attraction.md"
     skills: ["memory_skill"]
     output_format: "text"
@@ -19,7 +19,7 @@ agents:
   weather:
     name: "天气查询专家"
     role: "查询城市天气信息"
-    tools: ["天气查询"]
+    tools: ["amap_weather"]
     main_prompt: "agents/weather.md"
     skills: []
     output_format: "text"
@@ -27,7 +27,7 @@ agents:
   hotel:
     name: "酒店推荐专家"
     role: "推荐合适的酒店"
-    tools: ["酒店搜索"]
+    tools: ["hotel_search", "amap_hotel_search"]
     main_prompt: "agents/hotel.md"
     skills: ["memory_skill"]
     output_format: "text"

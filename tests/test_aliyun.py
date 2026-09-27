@@ -8,18 +8,15 @@ def test_aliyun_llm():
     
     try:
         from app.llm import get_aliyun_llm
-        from app.chain import create_basic_chain
         
         print("✓ Imports successful")
         
         llm = get_aliyun_llm()  # 从环境变量 DASHSCOPE_MODEL 读取模型名
         print("✓ Created Aliyun LLM instance")
 
-        chain = create_basic_chain(provider="aliyun")  # 从环境变量读取模型名
-        print("✓ Created chain with Aliyun provider")
-        
-        response = chain.invoke({"question": "你好，我是阿里云用户"})
-        print(f"\nResponse from Aliyun Qwen: {response}")
+        response = llm.invoke("你好，我是阿里云用户")
+        text = response.content if hasattr(response, "content") else str(response)
+        print(f"\nResponse from Aliyun Qwen: {text}")
         
         return True
         

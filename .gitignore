@@ -21,3 +21,7 @@ build/
 *.swp
 *.swo
 *~
+chroma_db/
+chroma_data/
+app/data/chroma/
+app/data/chroma_smoke/

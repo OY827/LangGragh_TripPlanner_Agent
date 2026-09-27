@@ -44,13 +44,13 @@ class VersionManager:
     管理旅行计划的版本链和对话会话，支持多轮修改中的版本控制。
     """
     
-    def __init__(self, use_redis: bool = False, redis_host: str = None,
+    def __init__(self, use_redis: bool = True, redis_host: str = None,
                  redis_port: int = None, redis_password: str = None):
         """
         初始化版本管理器
         
         Args:
-            use_redis: 是否使用Redis存储
+            use_redis: 是否使用Redis存储（默认 True；连不上则回退文件）
             redis_host: Redis主机
             redis_port: Redis端口
             redis_password: Redis密码
@@ -643,3 +643,37 @@ class VersionManager:
             "created_at": session.created_at,
             "updated_at": session.updated_at
         }
+
+    def format_versions_for_llm(self, session_id: str, limit: int = 8) -> str:
+        """把版本链压成短文本，供对话 LLM 查询/回退。"""
+        versions = self.get_version_history(session_id)
+        if not versions:
+            return "暂无计划版本。"
+
+        session = self.get_session(session_id)
+        current_id = session.current_version_id if session else ""
+        lines = [f"共 {len(versions)} 个版本，当前版本 {current_id}："]
+        for version in versions[-limit:]:
+            plan = version.plan_data or {}
+            marker = "（当前）" if version.version_id == current_id else ""
+            attractions = plan.get("attractions") or []
+            changes = "；".join(version.changes[:3]) if version.changes else "初始版本"
+            lines.append(
+                f"- v{version.version_number} {version.version_id}{marker}: "
+                f"{plan.get('city', '')} {plan.get('duration_days', '')}天, "
+                f"景点 {', '.join(attractions[:6]) or '无'}; {changes}"
+            )
+        return "\n".join(lines)
+
+    def search_versions(self, session_id: str, query: str) -> List[PlanVersion]:
+        """按关键词检索本会话的计划版本，给 LLM 工具调用。"""
+        query_text = (query or "").strip().lower()
+        if not query_text:
+            return self.get_version_history(session_id)
+
+        matched = []
+        for version in self.get_version_history(session_id):
+            blob = json.dumps(version.to_dict(), ensure_ascii=False).lower()
+            if query_text in blob:
+                matched.append(version)
+        return matched

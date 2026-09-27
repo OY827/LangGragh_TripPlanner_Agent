@@ -1,6 +1,7 @@
 from .data_loader import KnowledgeBaseLoader
 from .data_collector import AttractionDataCollector, get_default_collector
-from .vector_store import QdrantVectorStore
+from .vector_store import QdrantVectorStore, get_vector_store, get_guide_vector_store
+from .chroma_store import ChromaVectorStore
 from .retriever import KnowledgeRetriever, SearchType
 from .generator import AnswerGenerator, create_generator
 from .splitter import DocumentSplitter, SplitStrategy, create_splitter
@@ -21,6 +22,9 @@ __all__ = [
     "get_default_collector",
     # 向量存储与检索
     "QdrantVectorStore",
+    "ChromaVectorStore",
+    "get_vector_store",
+    "get_guide_vector_store",
     "KnowledgeRetriever",
     "SearchType",
     # 生成器

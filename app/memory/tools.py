@@ -4,7 +4,7 @@
 """
 
 import json
-from typing import Optional, Type
+from typing import Any, Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -16,7 +16,8 @@ class TravelMemoryQueryInput(BaseModel):
     user_id: str = Field(description="用户ID")
     query_type: str = Field(
         description="查询类型，可选值: stats(统计), date_range(日期范围), budget_range(预算范围), "
-                    "attraction(景点), duration(天数), search(组合搜索), cities(城市列表)"
+                    "attraction(景点), duration(天数), search(组合搜索), cities(城市列表), "
+                    "semantic(语义检索长期记忆), preferences(用户偏好)"
     )
     start_date: Optional[str] = Field(default=None, description="开始日期 (YYYY-MM-DD)")
     end_date: Optional[str] = Field(default=None, description="结束日期 (YYYY-MM-DD)")
@@ -44,7 +45,7 @@ class TravelMemoryQueryTool(BaseTool):
     - "我都去过哪些景点？"
     - "我平均每次旅行花多少钱？"
     """
-    name: str = "旅行记忆查询"
+    name: str = "travel_memory_query"
     description: str = (
         "查询用户历史旅行数据的工具。支持多种查询模式：\n"
         "1. stats: 获取用户旅行统计（总行程数、平均预算、热门景点等）\n"
@@ -54,13 +55,15 @@ class TravelMemoryQueryTool(BaseTool):
         "5. duration: 按天数查询（如：3-5天的行程）\n"
         "6. search: 组合条件搜索\n"
         "7. cities: 获取所有去过的城市列表\n"
+        "8. semantic: 用自然语言检索长期记忆（偏好/去过的景点/历史行程）\n"
+        "9. preferences: 获取用户偏好列表\n"
     )
     args_schema: Type[BaseModel] = TravelMemoryQueryInput
     memory_manager: TravelMemoryManager = None
     
     def __init__(self, memory_manager: TravelMemoryManager = None, **kwargs):
         super().__init__(**kwargs)
-        self.memory_manager = memory_manager or TravelMemoryManager(use_redis=False)
+        self.memory_manager = memory_manager or TravelMemoryManager()
     
     def _run(
         self,
@@ -102,11 +105,18 @@ class TravelMemoryQueryTool(BaseTool):
                 return self._query_search(user_id, start_date, end_date, min_budget, max_budget, attraction, min_days, max_days, city, limit)
             elif query_type == "cities":
                 return self._query_cities(user_id)
+            elif query_type == "semantic":
+                return self._query_semantic(user_id, attraction or city or "", limit)
+            elif query_type == "preferences":
+                return self._query_preferences(user_id, city)
             else:
                 return json.dumps({
                     "success": False,
                     "error": f"不支持的查询类型: {query_type}",
-                    "supported_types": ["stats", "date_range", "budget_range", "attraction", "duration", "search", "cities"]
+                    "supported_types": [
+                        "stats", "date_range", "budget_range", "attraction",
+                        "duration", "search", "cities", "semantic", "preferences",
+                    ]
                 }, ensure_ascii=False, indent=2)
         except Exception as e:
             return json.dumps({
@@ -213,6 +223,27 @@ class TravelMemoryQueryTool(BaseTool):
                 "all_plans_count": len(plans)
             }
         }, ensure_ascii=False, indent=2)
+
+    def _query_semantic(self, user_id: str, query: str, limit: int) -> str:
+        if not query:
+            return json.dumps({
+                "success": False,
+                "error": "semantic 查询需要 attraction 或 city 作为自然语言 query",
+            }, ensure_ascii=False, indent=2)
+        hits = self.memory_manager.search_semantic(user_id, query, k=limit or 5)
+        return json.dumps({
+            "success": True,
+            "query_type": "semantic",
+            "data": hits,
+        }, ensure_ascii=False, indent=2)
+
+    def _query_preferences(self, user_id: str, city: Optional[str]) -> str:
+        prefs = self.memory_manager.get_preferences(user_id, city or "")
+        return json.dumps({
+            "success": True,
+            "query_type": "preferences",
+            "data": {"preferences": prefs},
+        }, ensure_ascii=False, indent=2)
     
     def _format_plans_result(self, plans, query_type: str, limit: int, extra: dict) -> str:
         """格式化计划列表结果"""
@@ -259,7 +290,7 @@ class DiffRecommendationTool(BaseTool):
     """
     差异推荐工具 - 对比用户历史记录，推荐新景点
     """
-    name: str = "差异推荐"
+    name: str = "diff_recommend"
     description: str = (
         "根据用户历史旅行记录，推荐与过去不同的新景点。"
         "如果用户之前去过某个城市，会推荐未游览过的景点。"
@@ -269,7 +300,7 @@ class DiffRecommendationTool(BaseTool):
     
     def __init__(self, memory_manager: TravelMemoryManager = None, **kwargs):
         super().__init__(**kwargs)
-        self.memory_manager = memory_manager or TravelMemoryManager(use_redis=False)
+        self.memory_manager = memory_manager or TravelMemoryManager()
     
     def _run(self, user_id: str, city: str) -> str:
         """执行差异推荐"""
@@ -286,18 +317,99 @@ class DiffRecommendationTool(BaseTool):
             }, ensure_ascii=False, indent=2)
 
 
-def get_memory_tools(memory_manager: TravelMemoryManager = None) -> list:
+class PlanVersionQueryInput(BaseModel):
+    session_id: str = Field(description="对话会话ID")
+    query_type: str = Field(
+        description="查询类型: history(版本列表), current(当前计划), search(关键词检索版本), compare(对比两个版本)"
+    )
+    query: Optional[str] = Field(default=None, description="search 时的关键词")
+    old_version_id: Optional[str] = Field(default=None, description="compare 时的旧版本ID")
+    new_version_id: Optional[str] = Field(default=None, description="compare 时的新版本ID")
+
+
+class PlanVersionQueryTool(BaseTool):
+    """查询 Redis 中当前会话的旅行计划版本，支持列表、检索、对比。"""
+    name: str = "plan_version_query"
+    description: str = (
+        "查询当前对话会话里的旅行计划版本。"
+        "用于「上一版有哪些景点」「对比这次修改」等，不查询用户跨会话长期记忆。"
+    )
+    args_schema: Type[BaseModel] = PlanVersionQueryInput
+    version_manager: Any = None
+
+    def __init__(self, version_manager=None, **kwargs):
+        super().__init__(**kwargs)
+        if version_manager is not None:
+            self.version_manager = version_manager
+        else:
+            from app.agents.version_manager import VersionManager
+            self.version_manager = VersionManager(use_redis=True)
+
+    def _run(
+        self,
+        session_id: str,
+        query_type: str,
+        query: Optional[str] = None,
+        old_version_id: Optional[str] = None,
+        new_version_id: Optional[str] = None,
+    ) -> str:
+        vm = self.version_manager
+        try:
+            if query_type == "history":
+                return json.dumps({
+                    "success": True,
+                    "data": vm.format_versions_for_llm(session_id),
+                }, ensure_ascii=False)
+            if query_type == "current":
+                version = vm.get_current_version(session_id)
+                return json.dumps({
+                    "success": True,
+                    "data": version.plan_data if version else None,
+                    "version_id": version.version_id if version else None,
+                }, ensure_ascii=False)
+            if query_type == "search":
+                versions = vm.search_versions(session_id, query or "")
+                return json.dumps({
+                    "success": True,
+                    "data": [
+                        {
+                            "version_id": v.version_id,
+                            "version_number": v.version_number,
+                            "changes": v.changes,
+                            "attractions": (v.plan_data or {}).get("attractions", []),
+                        }
+                        for v in versions
+                    ],
+                }, ensure_ascii=False)
+            if query_type == "compare":
+                if not old_version_id or not new_version_id:
+                    return json.dumps({"success": False, "error": "compare 需要 old_version_id 和 new_version_id"}, ensure_ascii=False)
+                diff = vm.compare_versions(old_version_id, new_version_id)
+                return json.dumps({
+                    "success": True,
+                    "data": diff.to_dict() if diff else None,
+                }, ensure_ascii=False)
+            return json.dumps({"success": False, "error": f"不支持的 query_type: {query_type}"}, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+def get_memory_tools(memory_manager: TravelMemoryManager = None, version_manager=None) -> list:
     """
     获取所有记忆相关工具
     
     Args:
         memory_manager: 共享的 TravelMemoryManager 实例
+        version_manager: 可选 VersionManager，用于查询 Redis 中的计划版本
         
     Returns:
         工具列表
     """
-    mm = memory_manager or TravelMemoryManager(use_redis=False)
-    return [
+    mm = memory_manager or TravelMemoryManager()
+    tools = [
         TravelMemoryQueryTool(memory_manager=mm),
         DiffRecommendationTool(memory_manager=mm),
     ]
+    if version_manager is not None:
+        tools.append(PlanVersionQueryTool(version_manager=version_manager))
+    return tools

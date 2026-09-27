@@ -1,6 +1,5 @@
 """
-统一数据模型定义
-整合schemas.py和agents/models.py的模型，并添加services层需要的模型
+统一数据模型定义（HTTP 进出与行程树）
 """
 
 from typing import List, Optional, Dict, Any, Union

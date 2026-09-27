@@ -48,6 +48,8 @@ class HotelState(TypedDict, total=False):
     """酒店子图状态"""
     city: str
     accommodation: str
+    start_date: str
+    travel_days: int
     
     hotel_response: str
     iteration_count: int

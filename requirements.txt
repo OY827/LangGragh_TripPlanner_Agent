@@ -1,7 +1,35 @@
+# LangChain / LangGraph
 langchain>=1.3.1
 langchain-openai>=1.2.1
 langchain-community>=0.4.1
 langchain-qdrant>=1.1.0
 langchain-neo4j>=0.9.0
+langchain-text-splitters>=1.0.0
+langgraph>=1.0.0
 langsmith>=0.3.0
 dashscope>=1.14.0
+
+# Web
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.0.0
+
+# Infra
+python-dotenv>=1.0.0
+PyYAML>=6.0
+pypdf>=5.0.0
+qdrant-client>=1.12.0
+neo4j>=5.0.0
+redis>=5.0.0
+rank-bm25>=0.2.2
+
+# MCP（ENABLE_MCP_TOOLS=true 时使用）
+mcp>=1.0.0
+
+# RAG 精排 / 本地 Embedding（未安装时会降级）
+sentence-transformers>=3.0.0
+langchain-huggingface>=0.1.0
+
+# 本地向量库 Chroma
+chromadb>=0.5.0
+langchain-chroma>=0.2.0

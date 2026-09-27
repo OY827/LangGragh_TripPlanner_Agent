@@ -42,16 +42,18 @@ class Settings:
 
 class MCPToolWrapper:
     """
-    MCP 工具包装器 - 使用 mcp 标准库连接 MCP 服务器
+    MCP 工具包装器 - 使用 mcp 标准库以 stdio 连接 MCP 服务器。
+
+    高德地图不要用这个：请走 app.services.amap_mcp_service（Streamable HTTP）。
     
     使用方法：
         wrapper = MCPToolWrapper(
-            name="amap",
-            description="高德地图服务",
-            server_command=["python", "-m", "amap_mcp_server"],
-            env={"AMAP_MAPS_API_KEY": "your_key"}
+            name="weather",
+            description="天气服务",
+            server_command=["uvx", "weather-mcp-server"],
+            env={"WEATHER_API_KEY": "your_key"}
         )
-        result = wrapper.invoke(name="maps_text_search", arguments={...})
+        result = wrapper.invoke(name="get_weather", arguments={...})
     """
     
     def __init__(
@@ -326,16 +328,7 @@ def init_mcp_tools() -> MCPToolManager:
         return manager
     
     print("初始化 MCP 工具...")
-    
-    # 注册高德地图工具
-    if settings.amap_api_key:
-        manager.register_tool(
-            name="amap",
-            description="高德地图服务 - 提供地理编码、逆地理编码、路径规划等功能",
-            server_command=["python", "-m", "amap_mcp_server"],
-            env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-            auto_expand=True
-        )
+    print("  高德地图已改为 Streamable HTTP（AmapMCPService），不再注册 stdio amap_mcp_server")
     
     # 注册天气服务工具（示例）
     if settings.weather_api_key:
@@ -381,28 +374,11 @@ if __name__ == "__main__":
     
     print("\n=== 使用示例 ===")
     print("""
-# 完整使用示例：
-from app.tools.mcp_tools import MCPToolManager, settings
+# 高德 MCP 已改为 Streamable HTTP，不要再 register python -m amap_mcp_server
+from app.services.amap_mcp_service import get_amap_mcp_service
 
-# 创建管理器（单例）
-manager = MCPToolManager()
-
-# 注册高德地图工具
-manager.register_tool(
-    name="amap",
-    description="高德地图服务",
-    server_command=["python", "-m", "amap_mcp_server"],
-    env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-    auto_expand=True
-)
-
-# 获取工具
-amap_tool = manager.get_tool("amap")
-
-# 调用工具
-result = amap_tool.invoke(
-    name="maps_text_search",
-    arguments={"keywords": "景点", "city": "北京"}
-)
-print(result)
+amap = get_amap_mcp_service()
+print(amap.list_tool_names())
+print(amap.weather("上海"))
+print(amap.text_search("外滩", "上海"))
     """)

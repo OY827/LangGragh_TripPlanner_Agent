@@ -31,7 +31,7 @@ from app.models.schemas import (
     DialogChatRequest, DialogChatResponse,
     normalize_trip_plan_day_indices,
 )
-from app.agents.trip_planner_agent import MultiAgentTripPlanner
+from app.agents.langgraph_builder import get_langgraph_agent
 from app.agents.dialog_agent import DialogAgent
 from app.agents.version_manager import VersionManager
 from app.services.amap_service import AmapService
@@ -41,7 +41,7 @@ from app.monitoring import get_metrics, get_alert_manager, setup_default_alerts,
 
 app = FastAPI(
     title="旅行规划API",
-    description="智能旅行规划服务，支持旅行计划生成、景点搜索、天气查询等功能",
+    description="智能旅行规划服务。出游计划走 LangGraph 主图（景点/天气/酒店并行子图）。",
     version="1.0.0",
 )
 
@@ -148,14 +148,45 @@ def _ensure_attraction_locations(daily: dict) -> dict:
     return data
 
 
+def graph_result_to_trip_plan(result: dict, request: TripRequest) -> Optional[TripPlan]:
+    """把 LangGraph 的 trip_plan_parsed 收成前端用的 TripPlan。"""
+    parsed = (result or {}).get("trip_plan_parsed")
+    if not isinstance(parsed, dict):
+        return None
+
+    data = dict(parsed)
+    data.setdefault("city", result.get("city") or request.city)
+    data.setdefault("start_date", request.start_date)
+    data.setdefault("end_date", request.end_date)
+    data.setdefault("days", [])
+    data.setdefault("weather_info", [])
+    data.setdefault("overall_suggestions", data.get("overall_suggestions") or "")
+
+    for i, day in enumerate(data.get("days") or []):
+        if not isinstance(day, dict):
+            continue
+        day.setdefault("date", request.start_date)
+        day.setdefault("day_index", i)
+        day.setdefault("description", day.get("description") or f"第{i + 1}天")
+        day.setdefault("attractions", [])
+        day.setdefault("meals", [])
+
+    patched = _ensure_attraction_locations(data)
+    try:
+        return normalize_trip_plan_day_indices(TripPlan(**patched))
+    except Exception as e:
+        print(f"⚠️ graph_result_to_trip_plan 校验失败: {e}")
+        return None
+
+
 def get_trip_planner():
     global trip_planner
     if trip_planner is None:
         try:
-            trip_planner = MultiAgentTripPlanner()
-            print("✅ TripPlanner初始化成功")
+            trip_planner = get_langgraph_agent(llm_provider="aliyun")
+            print("✅ LangGraph TripPlanner 初始化成功")
         except Exception as e:
-            print(f"⚠️ TripPlanner初始化失败: {e}")
+            print(f"⚠️ LangGraph TripPlanner 初始化失败: {e}")
     return trip_planner
 
 
@@ -185,7 +216,7 @@ def get_version_manager():
     global version_manager
     if version_manager is None:
         try:
-            version_manager = VersionManager(use_redis=False)
+            version_manager = VersionManager(use_redis=True)
             print("✅ VersionManager初始化成功")
         except Exception as e:
             print(f"⚠️ VersionManager初始化失败: {e}")
@@ -198,10 +229,10 @@ def get_dialog_agent():
         try:
             dialog_agent = DialogAgent(
                 llm_provider="aliyun",
-                use_redis=False,
+                use_redis=True,
                 enable_rag=True,
                 enable_amap=True,
-                enable_memory=False,
+                enable_memory=True,
             )
             print("✅ DialogAgent初始化成功")
         except Exception as e:
@@ -256,37 +287,37 @@ async def langsmith_status():
 @app.post("/api/trip/plan", response_model=TripPlanResponse, tags=["旅行计划"])
 async def generate_trip_plan(request: TripRequest, background_tasks: BackgroundTasks = None):
     """
-    生成旅行计划
-    
-    参数:
-    - city: 目的地城市
-    - start_date: 开始日期 YYYY-MM-DD
-    - end_date: 结束日期 YYYY-MM-DD
-    - travel_days: 旅行天数
-    - transportation: 交通方式
-    - accommodation: 住宿偏好
-    - preferences: 旅行偏好标签
-    - free_text_input: 额外要求
-    - user_id: 用户ID（用于旅行记忆）
+    生成旅行计划（LangGraph 主图：景点 / 天气 / 酒店并行）
     """
     try:
         planner = get_trip_planner()
         if not planner:
             raise HTTPException(status_code=500, detail="旅行规划服务初始化失败")
-        
-        result = planner.plan_trip(request)
-        
-        if result:
+
+        result = await planner.aplan_trip(
+            city=request.city,
+            travel_days=request.travel_days,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            transportation=request.transportation,
+            accommodation=request.accommodation,
+            preferences=request.preferences or [],
+            user_id=request.user_id or "",
+            free_text_input=request.free_text_input or "",
+            thread_id=request.user_id or None,
+        )
+        plan = graph_result_to_trip_plan(result, request)
+
+        if plan:
             return TripPlanResponse(
                 success=True,
                 message="旅行计划生成成功",
-                data=normalize_trip_plan_day_indices(result)
+                data=plan,
             )
-        else:
-            return TripPlanResponse(
-                success=False,
-                message="旅行计划生成失败"
-            )
+        return TripPlanResponse(
+            success=False,
+            message=result.get("trip_plan") or "旅行计划生成失败（图结果无法解析为 TripPlan）",
+        )
     except Exception as e:
         import traceback
         traceback.print_exc()

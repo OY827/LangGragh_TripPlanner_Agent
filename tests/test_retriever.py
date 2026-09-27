@@ -4,7 +4,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.rag import KnowledgeBaseLoader, QdrantVectorStore, KnowledgeRetriever
+from app.rag import KnowledgeBaseLoader, get_vector_store, KnowledgeRetriever
 
 
 def test_retriever():
@@ -17,7 +17,7 @@ def test_retriever():
     # 初始化组件
     print("\n📦 初始化组件...")
     loader = KnowledgeBaseLoader()
-    vector_store = QdrantVectorStore(url="http://localhost:6333")
+    vector_store = get_vector_store()
     retriever = KnowledgeRetriever(vector_store)
     print("✅ 组件初始化完成")
 
@@ -109,11 +109,6 @@ def test_retriever():
 
 
 if __name__ == "__main__":
-    # 检查 Qdrant 服务
-    print("\n⚠️ 请确保 Qdrant 服务已启动:")
-    print("   docker run -p 6333:6333 qdrant/qdrant")
-    print()
-
     try:
         test_retriever()
     except Exception as e:

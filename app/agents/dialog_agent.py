@@ -25,6 +25,7 @@ from app.agents.version_manager import VersionManager
 from app.llm import get_llm
 from app.prompts import get_prompt_manager
 from app.monitoring import traced
+from app.memory.sliding_window import SlidingWindowChatMemory
 
 
 class DialogAgent:
@@ -39,7 +40,7 @@ class DialogAgent:
         self,
         llm_provider: str = "aliyun",
         llm_model: str = None,
-        use_redis: bool = False,
+        use_redis: bool = True,
         context_window_size: int = 6,
         enable_rag: bool = True,
         enable_amap: bool = True,
@@ -51,16 +52,17 @@ class DialogAgent:
         Args:
             llm_provider: LLM 服务商
             llm_model: 模型名称
-            use_redis: 版本管理器是否使用 Redis
-            context_window_size: 保留最近N轮对话作为上下文
+            use_redis: 版本管理器是否使用 Redis（会话/计划版本）
+            context_window_size: LangChain 滑动窗口保留的最近消息条数
             enable_rag: 是否启用知识库检索
             enable_amap: 是否启用高德地图搜索
-            enable_memory: 是否启用记忆系统
+            enable_memory: 是否启用 Chroma 长期记忆
         """
         self.llm = get_llm(provider=llm_provider, model=llm_model, temperature=0.3)
         self.version_manager = VersionManager(use_redis=use_redis)
         self.prompt_manager = get_prompt_manager()
         self.context_window_size = context_window_size
+        self.chat_memory = SlidingWindowChatMemory(window_size=context_window_size)
 
         # 外部工具集成（带优雅降级）
         self.rag = None
@@ -90,7 +92,7 @@ class DialogAgent:
         if enable_memory:
             try:
                 from app.memory.memory_manager import TravelMemoryManager
-                self.memory = TravelMemoryManager(use_redis=use_redis)
+                self.memory = TravelMemoryManager()
                 print("✅ 对话Agent: 记忆系统工具已加载")
             except Exception as e:
                 print(f"⚠️ 对话Agent: 记忆系统加载失败: {e}")
@@ -141,10 +143,10 @@ class DialogAgent:
         
         current_plan = current_version.plan_data
 
-        # 2. 获取对话历史（用于上下文感知）
-        conversation_history = self.version_manager.get_conversation_history(
-            session_id, limit=self.context_window_size
-        )
+        # 2. 完整历史走 Redis 会话；送进 LLM 前用 LangChain trim_messages 滑窗压缩
+        raw_history = self.version_manager.get_conversation_history(session_id, limit=100)
+        conversation_history = self.chat_memory.compress_records(raw_history)
+        version_context = self.version_manager.format_versions_for_llm(session_id)
 
         # 3. 检测版本控制命令（回退/对比）
         version_cmd = self._detect_version_control_command(user_input)
@@ -157,7 +159,9 @@ class DialogAgent:
         resolved_input = self._resolve_reference(user_input, conversation_history, current_plan)
 
         # 5. 意图识别（注入对话上下文）
-        intent = self._analyze_intent(resolved_input, current_plan, conversation_history)
+        intent = self._analyze_intent(
+            resolved_input, current_plan, conversation_history, version_context
+        )
 
         # 6. 意图二次校验
         intent = self._validate_intent(intent, resolved_input)
@@ -245,7 +249,8 @@ class DialogAgent:
         self,
         user_input: str,
         current_plan: Dict[str, Any],
-        conversation_history: List[Dict[str, Any]] = None
+        conversation_history: List[Dict[str, Any]] = None,
+        version_context: str = "",
     ) -> ChangeIntent:
         """
         使用 LLM 分析用户的修改意图（注入对话上下文）
@@ -253,12 +258,15 @@ class DialogAgent:
         Args:
             user_input: 用户输入
             current_plan: 当前计划
-            conversation_history: 对话历史（最近N轮）
+            conversation_history: 已经过滑动窗口压缩的对话历史
+            version_context: Redis 中的计划版本摘要，供查询/回退
             
         Returns:
             ChangeIntent 修改意图对象
         """
-        prompt = self._build_intent_prompt(user_input, current_plan, conversation_history)
+        prompt = self._build_intent_prompt(
+            user_input, current_plan, conversation_history, version_context
+        )
         
         try:
             response = self.llm.invoke(prompt)
@@ -286,9 +294,10 @@ class DialogAgent:
         self,
         user_input: str,
         current_plan: Dict[str, Any],
-        conversation_history: List[Dict[str, Any]] = None
+        conversation_history: List[Dict[str, Any]] = None,
+        version_context: str = "",
     ) -> str:
-        """构建意图识别的 LLM 提示词（包含对话上下文）"""
+        """构建意图识别的 LLM 提示词（包含滑动窗口后的对话上下文）"""
         plan_summary = {
             "city": current_plan.get("city", ""),
             "duration_days": current_plan.get("duration_days", 0),
@@ -296,32 +305,30 @@ class DialogAgent:
             "budget": current_plan.get("budget", {})
         }
         
-        # 构建对话上下文
-        context_str = ""
-        if conversation_history:
-            context_lines = []
-            for msg in conversation_history[-6:]:  # 最近6条
-                role = "用户" if msg.get("role") == "user" else "助手"
-                content = msg.get("content", "")[:120]
-                context_lines.append(f"  {role}: {content}")
-            context_str = "\n".join(context_lines)
+        context_str = self.chat_memory.format_for_prompt(conversation_history or [])
         
         context_section = ""
         if context_str:
             context_section = f"""
-## 最近对话上下文
+## 最近对话上下文（滑动窗口，最近{self.context_window_size}条）
 {context_str}
 
 请结合对话上下文理解用户的真实意图。例如：
 - 如果用户说"那个不要了"，结合上下文确定"那个"指什么
 - 如果用户说"再便宜点"，说明上一轮的降价幅度不够
 """
+        version_section = ""
+        if version_context:
+            version_section = f"""
+## 本会话计划版本（可回退/对比）
+{version_context}
+"""
         
         return f"""你是一个旅行计划修改意图分析器。请分析用户的修改需求。
 
 ## 当前计划摘要
 {json.dumps(plan_summary, ensure_ascii=False, indent=2)}
-{context_section}
+{context_section}{version_section}
 ## 用户输入
 {user_input}
 

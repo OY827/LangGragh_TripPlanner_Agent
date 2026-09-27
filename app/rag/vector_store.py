@@ -1,8 +1,6 @@
 """
 向量存储模块 - Vector Store
-基于 Qdrant 的向量存储实现
-支持本地 HuggingFace 模型和阿里云 Embedding API
-支持向量检索 + BM25 混合检索
+默认使用本地 Chroma；Qdrant 实现保留给 VECTOR_BACKEND=qdrant
 """
 
 import os
@@ -13,31 +11,13 @@ from langchain_core.documents import Document
 from qdrant_client import QdrantClient, models
 from langchain_qdrant import QdrantVectorStore as LangChainQdrant
 
+from app.rag.embeddings import build_embeddings
+
 try:
     from rank_bm25 import BM25Okapi
 except ImportError:
     BM25Okapi = None
     print("⚠️ rank_bm25 未安装，BM25检索不可用")
-
-_embedding_backend = os.getenv("EMBEDDING_BACKEND", "dashscope").lower()
-
-if _embedding_backend == "dashscope":
-    try:
-        from langchain_dashscope import DashScopeEmbeddings
-    except ImportError:
-        _embedding_backend = "huggingface"
-        print("⚠️ langchain-dashscope 未安装，使用 HuggingFace Embeddings")
-
-if _embedding_backend == "huggingface":
-    try:
-        from langchain_huggingface import HuggingFaceEmbeddings
-    except ImportError:
-        HuggingFaceEmbeddings = None
-    
-    try:
-        from langchain_community.embeddings import SentenceTransformerEmbeddings
-    except ImportError:
-        SentenceTransformerEmbeddings = None
 
 
 class QdrantVectorStore:
@@ -66,46 +46,7 @@ class QdrantVectorStore:
                 check_compatibility=False
             )
 
-        # 根据后端选择Embedding模型
-        backend = embedding_backend or _embedding_backend
-        
-        if backend == "dashscope":
-            model_name = embedding_model_name or os.getenv("EMBEDDING_MODEL", "text-embedding-v1")
-            self.embeddings = DashScopeEmbeddings(
-                model=model_name,
-                api_key=os.getenv("DASHSCOPE_API_KEY")
-            )
-            print(f"✅ 使用阿里云 DashScope Embedding: {model_name}")
-        else:
-            model_name = embedding_model_name or os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
-            if HuggingFaceEmbeddings is not None:
-                try:
-                    self.embeddings = HuggingFaceEmbeddings(
-                        model_name=model_name,
-                        model_kwargs={"device": "cpu"},
-                        encode_kwargs={"normalize_embeddings": True}
-                    )
-                    print(f"✅ 使用 HuggingFace Embedding: {model_name}")
-                except Exception as e:
-                    print(f"⚠️ HuggingFaceEmbeddings 初始化失败: {e}")
-                    if SentenceTransformerEmbeddings is not None:
-                        self.embeddings = SentenceTransformerEmbeddings(
-                            model_name=model_name,
-                            model_kwargs={"device": "cpu"},
-                            encode_kwargs={"normalize_embeddings": True}
-                        )
-                        print(f"✅ 使用 SentenceTransformer Embedding: {model_name}")
-                    else:
-                        raise ImportError("sentence-transformers 未安装，请运行: pip install sentence-transformers")
-            elif SentenceTransformerEmbeddings is not None:
-                self.embeddings = SentenceTransformerEmbeddings(
-                    model_name=model_name,
-                    model_kwargs={"device": "cpu"},
-                    encode_kwargs={"normalize_embeddings": True}
-                )
-                print(f"✅ 使用 SentenceTransformer Embedding: {model_name}")
-            else:
-                raise ImportError("sentence-transformers 未安装，请运行: pip install sentence-transformers")
+        self.embeddings, _, _ = build_embeddings(embedding_backend, embedding_model_name)
 
         # 默认集合名称
         self.default_collection = os.getenv("QDRANT_COLLECTION", "travel_knowledge")
@@ -114,9 +55,13 @@ class QdrantVectorStore:
         self._bm25_indexes = {}
         self._bm25_corpus = {}
     
+    def collection_exists(self, collection_name: str = None) -> bool:
+        collection = collection_name or self.default_collection
+        return self.client.collection_exists(collection_name=collection)
+
     def _create_collection_if_not_exists(self, collection_name: str) -> None:
         """如果集合不存在则创建"""
-        if not self.client.collection_exists(collection_name=collection_name):
+        if not self.collection_exists(collection_name):
             print(f"创建集合 '{collection_name}'...")
             self.client.create_collection(
                 collection_name=collection_name,
@@ -468,3 +413,41 @@ class QdrantVectorStore:
         sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
         
         return [seen[k] for k in sorted_keys[:k] if k in seen]
+
+
+def get_vector_store(**kwargs):
+    """按 VECTOR_BACKEND 创建向量库，默认本地 Chroma。"""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    backend = os.getenv("VECTOR_BACKEND", "chroma").strip().lower()
+    if backend == "qdrant":
+        return QdrantVectorStore(**kwargs)
+
+    from app.rag.chroma_store import ChromaVectorStore
+
+    chroma_keys = {
+        "persist_directory",
+        "collection_name",
+        "embedding_model_name",
+        "embedding_backend",
+    }
+    return ChromaVectorStore(**{k: v for k, v in kwargs.items() if k in chroma_keys})
+
+
+def get_guide_collection_name() -> str:
+    return (
+        os.getenv("CHROMA_GUIDE_COLLECTION")
+        or os.getenv("QDRANT_GUIDE_COLLECTION")
+        or "travel_guides"
+    )
+
+
+def get_guide_vector_store(**kwargs):
+    """攻略专用向量库，collection 与景点库分离。"""
+    kwargs = dict(kwargs)
+    kwargs.setdefault("collection_name", get_guide_collection_name())
+    return get_vector_store(**kwargs)

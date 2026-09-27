@@ -11,7 +11,8 @@ from app.rag import (
     GuideRecommendTool,
     RAGToolkit,
     KnowledgeBaseLoader,
-    QdrantVectorStore
+    get_vector_store,
+    KnowledgeRetriever,
 )
 
 
@@ -25,7 +26,7 @@ def test_rag_tools():
     # 初始化知识库数据
     print("\n📦 初始化知识库...")
     loader = KnowledgeBaseLoader()
-    vector_store = QdrantVectorStore(url="http://localhost:6333")
+    vector_store = get_vector_store()
     docs = loader.load_attraction_data("北京")
     try:
         vector_store.add_documents(docs)
@@ -35,7 +36,8 @@ def test_rag_tools():
 
     # 创建工具包
     print("\n🔨 创建RAG工具包...")
-    toolkit = RAGToolkit(vector_store.retriever)
+    retriever = KnowledgeRetriever(vector_store)
+    toolkit = RAGToolkit(retriever)
     print(f"   ✅ 创建 {len(toolkit.tools)} 个工具:")
     for tool in toolkit.tools:
         print(f"      - {tool.name}")

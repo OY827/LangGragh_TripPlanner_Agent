@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 
 
 class CalculatorTool(BaseTool):
-    name: str = "计算器"
+    name: str = "calculator"
     description: str = "用于执行数学计算，输入应为数学表达式字符串"
 
     def _run(self, expression: str) -> str:
@@ -38,7 +38,7 @@ class CodeInterpreterTool(BaseTool):
     - 路线优化问题
     - 统计分析
     """
-    name: str = "代码解释器"
+    name: str = "code_interpreter"
     description: str = (
         "执行Python代码的工具。当需要进行复杂计算、数据转换、统计分析时使用此工具。"
         "输入必须是完整的Python代码字符串。支持的模块：math, json, itertools, datetime, re, statistics, collections。"
@@ -188,7 +188,7 @@ class CodeInterpreterTool(BaseTool):
 
 
 class SearchTool(BaseTool):
-    name: str = "网络搜索"
+    name: str = "web_search"
     description: str = "用于在网上搜索信息，输入应为搜索查询词"
 
     def _run(self, query: str) -> str:
@@ -199,7 +199,7 @@ class SearchTool(BaseTool):
 
 
 class DateTimeTool(BaseTool):
-    name: str = "日期时间"
+    name: str = "datetime_now"
     description: str = "获取当前日期和时间，不需要输入参数"
 
     def _run(self, input: str = "") -> str:
@@ -211,8 +211,8 @@ class DateTimeTool(BaseTool):
 
 
 class WeatherTool(BaseTool):
-    name: str = "天气查询"
-    description: str = "获取特定位置的天气信息，输入应为城市名称"
+    name: str = "mock_weather"
+    description: str = "获取特定位置的天气信息，输入应为城市名称（模拟，生产请用 amap_weather）"
 
     def _run(self, location: str) -> str:
         return f"{location}天气: [这是模拟天气结果。在生产环境中，您需要调用真实的天气API。]"
@@ -234,62 +234,32 @@ class AmapAttractionTool(BaseTool):
     高德地图景点搜索工具
     使用MCP调用高德地图POI搜索API获取景点信息
     """
-    name: str = "景点搜索"
-    description: str = "搜索指定城市的景点信息"
+    name: str = "amap_attraction_search"
+    description: str = "用高德搜索指定城市的景点（名称、地址、坐标）。无评分无票价。"
     args_schema: type = AttractionSearchInput
 
     def _run(self, city: str, keywords: str = "景点") -> str:
         try:
-            from app.tools.mcp_tools import MCPToolManager, settings
-            
+            from app.services.amap_service import get_amap_service
+
             if not city:
                 return "错误：缺少城市参数"
-            
-            # 获取MCP工具并调用
-            manager = MCPToolManager()
-            
-            # 确保工具已注册
-            if "amap" not in manager:
-                if settings.amap_api_key and settings.enable_mcp_tools:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True
-                    )
-                else:
-                    return f"景点搜索失败：高德地图 MCP 工具未启用，请检查配置"
-            
-            amap_tool = manager.get_tool("amap")
-            if not amap_tool:
-                return f"景点搜索失败：无法获取高德地图工具"
-            
-            # 调用MCP工具搜索景点
-            result = amap_tool.invoke(
-                name="maps_text_search",
-                arguments={
-                    "keywords": keywords,
-                    "city": city,
-                    "citylimit": "true"
-                }
-            )
-            
-            if result and "pois" in result:
-                pois = result["pois"]
-                if pois:
-                    result_list = []
-                    for poi in pois[:10]:  # 最多返回10个景点
-                        info = f"- {poi.get('name', '')}\n  地址: {poi.get('address', '')}\n  类型: {poi.get('type', '')}"
-                        if poi.get('location'):
-                            info += f"\n  坐标: {poi['location']}"
-                        result_list.append(info)
-                    return "\n\n".join(result_list)
-                else:
-                    return f"未找到{city}的{keywords}相关景点"
-            else:
-                return f"景点搜索失败：{result.get('error', '未知错误')}"
-                
+
+            pois = get_amap_service().search_poi(keywords=keywords or "景点", city=city)
+            if not pois:
+                return f"未找到{city}的{keywords}相关景点"
+
+            result_list = []
+            for poi in pois[:10]:
+                loc = ""
+                if getattr(poi, "location", None):
+                    loc = f"{poi.location.longitude},{poi.location.latitude}"
+                info = f"- {poi.name}\n  地址: {poi.address or ''}\n  类型: {poi.type or ''}"
+                if loc:
+                    info += f"\n  坐标: {loc}"
+                result_list.append(info)
+            return "\n\n".join(result_list)
+
         except Exception as e:
             return f"景点搜索出错：{str(e)}"
 
@@ -305,58 +275,47 @@ class AmapWeatherTool(BaseTool):
     高德地图天气查询工具
     使用MCP调用高德地图天气API获取天气信息
     """
-    name: str = "天气查询"
-    description: str = "查询指定城市的天气信息"
+    name: str = "amap_weather"
+    description: str = "查询指定城市的天气（高德，含多日预报）"
     args_schema: type = WeatherSearchInput
 
     def _run(self, city: str) -> str:
         try:
-            from app.tools.mcp_tools import MCPToolManager, settings
-            
+            from app.services.amap_mcp_service import get_amap_mcp_service, is_amap_mcp_enabled
+            from app.services.amap_service import get_amap_service
+
             if not city:
                 return "错误：缺少城市参数"
-            
-            # 获取MCP工具并调用
-            manager = MCPToolManager()
-            
-            # 确保工具已注册
-            if "amap" not in manager:
-                if settings.amap_api_key and settings.enable_mcp_tools:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True
-                    )
-                else:
-                    return f"天气查询失败：高德地图 MCP 工具未启用，请检查配置"
-            
-            amap_tool = manager.get_tool("amap")
-            if not amap_tool:
-                return f"天气查询失败：无法获取高德地图工具"
-            
-            # 调用MCP工具查询天气
-            result = amap_tool.invoke(
-                name="maps_weather",
-                arguments={"city": city}
+
+            if is_amap_mcp_enabled():
+                mcp = get_amap_mcp_service()
+                if mcp.is_configured():
+                    result = mcp.weather(city)
+                    forecasts = (result or {}).get("forecasts") or []
+                    if forecasts:
+                        weather_info = f"{city} 天气预报：\n"
+                        week_names = ["一", "二", "三", "四", "五", "六", "日"]
+                        for forecast in forecasts[:3]:
+                            try:
+                                week = week_names[int(forecast.get("week", 1)) - 1]
+                            except (TypeError, ValueError, IndexError):
+                                week = str(forecast.get("week", ""))
+                            weather_info += f"\n{forecast.get('date')} (周{week}):\n"
+                            weather_info += f"  白天: {forecast.get('dayweather', '')} {forecast.get('daytemp', '')}°C\n"
+                            weather_info += f"  夜间: {forecast.get('nightweather', '')} {forecast.get('nighttemp', '')}°C\n"
+                        return weather_info
+
+            weather = get_amap_service().get_weather(city)
+            if not weather:
+                return "天气查询失败：未获取到预报信息"
+            return (
+                f"{weather.city or city} 天气：\n"
+                f"  天气: {weather.weather}\n"
+                f"  温度: {weather.temperature or ''}\n"
+                f"  风向: {weather.wind_direction or ''}\n"
+                f"  风力: {weather.wind_power or ''}"
             )
-            
-            # 处理天气结果
-            if result and "forecasts" in result:
-                forecasts = result.get("forecasts", [])
-                if forecasts:
-                    weather_info = f"{city} 天气预报：\n"
-                    for forecast in forecasts[:3]:
-                        weather_info += f"\n{forecast.get('date')} (周{['一','二','三','四','五','六','日'][int(forecast.get('week', 1))-1]}):\n"
-                        weather_info += f"  白天: {forecast.get('dayweather', '')} {forecast.get('daytemp', '')}°C\n"
-                        weather_info += f"  夜间: {forecast.get('nightweather', '')} {forecast.get('nighttemp', '')}°C\n"
-                    return weather_info
-                else:
-                    return f"天气查询失败：未获取到预报信息"
-            else:
-                return f"天气查询失败：{result.get('error', '未知错误')}"
-                
+
         except Exception as e:
             return f"天气查询出错：{str(e)}"
 
@@ -375,76 +334,39 @@ class AmapRouteTool(BaseTool):
     高德地图路线规划工具
     使用MCP调用高德地图路线规划API，获取两点之间的路线信息
     """
-    name: str = "路线规划"
-    description: str = "规划两点之间的路线，返回距离、时长和交通方式建议。支持步行、驾车和公共交通三种方式"
+    name: str = "amap_route"
+    description: str = "规划两点之间的路线，返回距离、时长和交通方式。支持 walking/driving/transit"
     args_schema: type = RoutePlanInput
 
     def _run(self, origin: str, destination: str, mode: str = "walking", city: str = "") -> str:
         try:
-            from app.tools.mcp_tools import MCPToolManager, settings
-            
+            from app.services.amap_service import get_amap_service
+
             if not origin or not destination:
                 return "错误：缺少起点或终点参数"
-            
-            manager = MCPToolManager()
-            
-            if "amap" not in manager:
-                if settings.amap_api_key and settings.enable_mcp_tools:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True
-                    )
-                else:
-                    return "路线规划失败：高德地图 MCP 工具未启用，请检查配置"
-            
-            amap_tool = manager.get_tool("amap")
-            if not amap_tool:
-                return "路线规划失败：无法获取高德地图工具"
-            
-            tool_name_map = {
-                "driving": "maps_direction_driving_by_address",
-                "walking": "maps_direction_walking_by_address",
-                "transit": "maps_direction_transit_integrated_by_address"
-            }
-            tool_name = tool_name_map.get(mode, "maps_direction_walking_by_address")
-            
-            params = {
-                "origin_address": origin,
-                "destination_address": destination,
-            }
-            
-            if city:
-                params["origin_city"] = city
-                params["destination_city"] = city
-            
-            result = amap_tool.invoke(
-                name=tool_name,
-                arguments=params
+
+            info = get_amap_service().route_direction(
+                origin=origin,
+                destination=destination,
+                mode=mode or "walking",
+                city=city or None,
             )
-            
-            if result and "error" not in result:
-                route = result.get("route", {})
-                
-                if mode == "transit":
-                    transits = route.get("transits", [])
-                    if transits:
-                        transit = transits[0]
-                        return self._format_transit_result(origin, destination, transit)
-                    else:
-                        return f"未找到从{origin}到{destination}的公共交通路线"
-                else:
-                    paths = route.get("paths", [])
-                    if paths:
-                        path = paths[0]
-                        return self._format_driving_walking_result(origin, destination, path, mode)
-                    else:
-                        return f"未找到从{origin}到{destination}的路线"
-            else:
-                return f"路线规划失败：{result.get('error', '未知错误')}"
-                
+            if not info:
+                return f"未找到从{origin}到{destination}的路线"
+
+            if mode == "transit":
+                transits = info.transits or []
+                if transits:
+                    return self._format_transit_result(origin, destination, transits[0])
+                return f"未找到从{origin}到{destination}的公共交通路线"
+
+            paths = info.paths or []
+            path = paths[0] if paths else {
+                "distance": info.distance or "0",
+                "duration": info.duration or "0",
+            }
+            return self._format_driving_walking_result(origin, destination, path, mode)
+
         except Exception as e:
             return f"路线规划出错：{str(e)}"
 
@@ -544,113 +466,110 @@ class AmapRouteTool(BaseTool):
 
 class HotelSearchInput(BaseModel):
     city: str = Field(..., description="城市名称")
-    keywords: str = Field(default="酒店", description="酒店类型关键词")
+    keywords: str = Field(default="酒店", description="酒店类型关键词，如经济型酒店、豪华酒店")
+    check_in_date: str = Field(default="", description="入住日期，格式 YYYY-MM-DD，可空")
+    stay_nights: int = Field(default=1, description="住宿晚数，默认1")
 
-class AmapHotelTool(BaseTool):
+
+def _coerce_stay_nights(stay_nights) -> int:
+    try:
+        nights = int(stay_nights or 1)
+    except (TypeError, ValueError):
+        nights = 1
+    return max(1, nights)
+
+
+class RollingGoHotelTool(BaseTool):
     """
-    高德地图酒店搜索工具
-    使用MCP调用高德地图POI搜索API获取酒店信息，包含评分
+    RollingGo（道旅）酒店 MCP 工具。
+    酒店推荐 Agent 的主工具：实时星级和每晚报价。
     """
-    name: str = "酒店搜索"
-    description: str = "搜索指定城市的酒店信息，返回酒店名称、地址、评分等信息"
+    name: str = "hotel_search"
+    description: str = (
+        "用 RollingGo 酒店 MCP 搜索带价格、星级的酒店（主工具）。"
+        "必填 city；建议传入 keywords、check_in_date（YYYY-MM-DD）、stay_nights。"
+    )
     args_schema: type = HotelSearchInput
 
-    def _run(self, city: str, keywords: str = "酒店") -> str:
+    def _run(
+        self,
+        city: str,
+        keywords: str = "酒店",
+        check_in_date: str = "",
+        stay_nights: int = 1,
+    ) -> str:
+        if not city:
+            return "错误：缺少城市参数"
         try:
-            from app.tools.mcp_tools import MCPToolManager, settings
-            
-            if not city:
-                return "错误：缺少城市参数"
-            
-            # 获取MCP工具并调用
-            manager = MCPToolManager()
-            
-            # 确保工具已注册
-            if "amap" not in manager:
-                if settings.amap_api_key and settings.enable_mcp_tools:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True
-                    )
-                else:
-                    return f"酒店搜索失败：高德地图 MCP 工具未启用，请检查配置"
-            
-            amap_tool = manager.get_tool("amap")
-            if not amap_tool:
-                return f"酒店搜索失败：无法获取高德地图工具"
-            
-            # 调用MCP工具搜索酒店
-            result = amap_tool.invoke(
-                name="maps_text_search",
-                arguments={
-                    "keywords": keywords,
-                    "city": city,
-                    "citylimit": "true"
-                }
-            )
-            
-            if result and "pois" in result:
-                pois = result["pois"]
-                if pois:
-                    result_list = []
-                    hotel_count = 0
-                    for poi in pois[:20]:
-                        name = poi.get('name', '')
-                        address = poi.get('address', '')
-                        typecode = poi.get('typecode', '')
-                        
-                        if typecode.startswith('11'):
-                            continue
-                        
-                        info = f"- {name}\n  地址: {address}"
-                        
-                        if typecode.startswith('10'):
-                            info += "\n  类型: 酒店"
-                        else:
-                            info += f"\n  类型: {typecode}"
-                            
-                        poi_id = poi.get('id')
-                        if poi_id:
-                            try:
-                                detail_result = amap_tool.invoke(
-                                    name="maps_search_detail",
-                                    arguments={"id": poi_id}
-                                )
-                                if detail_result:
-                                    if "poiinfo" in detail_result:
-                                        poiinfo = detail_result["poiinfo"]
-                                        if poiinfo.get('rating'):
-                                            info += f"\n  评分: {poiinfo['rating']}"
-                                        if poiinfo.get('type'):
-                                            info += f"\n  酒店类型: {poiinfo['type']}"
-                                    elif detail_result.get('rating'):
-                                        info += f"\n  评分: {detail_result['rating']}"
-                            except:
-                                pass
-                        
-                        result_list.append(info)
-                        hotel_count += 1
-                        
-                        if hotel_count >= 10:
-                            break
-                    
-                    if result_list:
-                        return "\n\n".join(result_list)
-                    else:
-                        return f"未找到{city}的{keywords}相关酒店"
-                else:
-                    return f"未找到{city}的{keywords}相关酒店"
-            else:
-                return f"酒店搜索失败：{result.get('error', '未知错误')}"
-                
-        except Exception as e:
-            return f"酒店搜索出错：{str(e)}"
+            from app.services.hotel_mcp_service import get_hotel_mcp_service
 
-    async def _arun(self, city: str, keywords: str = "酒店") -> str:
-        return self._run(city, keywords)
+            service = get_hotel_mcp_service()
+            if not service.is_configured():
+                return "酒店搜索失败：未配置 HOTEL_API_KEY / HOTEL_MCP_URL"
+            return service.search_and_format(
+                city=city,
+                keywords=keywords or "",
+                accommodation=keywords or "",
+                check_in_date=check_in_date or None,
+                stay_nights=_coerce_stay_nights(stay_nights),
+            )
+        except Exception as e:
+            return f"RollingGo 酒店搜索出错：{str(e)}"
+
+    async def _arun(
+        self,
+        city: str,
+        keywords: str = "酒店",
+        check_in_date: str = "",
+        stay_nights: int = 1,
+    ) -> str:
+        return self._run(city, keywords, check_in_date, stay_nights)
+
+
+class AmapHotelTool(BaseTool):
+    """高德 POI 酒店位置兜底（通常无报价）。"""
+    name: str = "amap_hotel_search"
+    description: str = "仅在 hotel_search 无结果时使用。返回高德酒店名称和地址，通常没有价格。"
+    args_schema: type = HotelSearchInput
+
+    def _run(
+        self,
+        city: str,
+        keywords: str = "酒店",
+        check_in_date: str = "",
+        stay_nights: int = 1,
+    ) -> str:
+        if not city:
+            return "错误：缺少城市参数"
+        try:
+            from app.services.amap_service import get_amap_service
+
+            service = get_amap_service()
+            pois = service.search_poi(keywords=keywords or "酒店", city=city) or []
+            if not pois:
+                return f"未找到{city}的{keywords}相关酒店"
+
+            result_list = []
+            for poi in pois[:10]:
+                name = poi.name if hasattr(poi, "name") else poi.get("name", "")
+                address = poi.address if hasattr(poi, "address") else poi.get("address", "")
+                poi_type = poi.type if hasattr(poi, "type") else poi.get("type", "")
+                info = f"- {name}\n  地址: {address}"
+                if poi_type:
+                    info += f"\n  类型: {poi_type}"
+                result_list.append(info)
+            return "\n\n".join(result_list) + "\n\n（高德 POI 兜底，可能无价格）"
+        except Exception as e:
+            return f"高德酒店搜索出错：{str(e)}"
+
+    async def _arun(
+        self,
+        city: str,
+        keywords: str = "酒店",
+        check_in_date: str = "",
+        stay_nights: int = 1,
+    ) -> str:
+        return self._run(city, keywords, check_in_date, stay_nights)
 
 
 def get_basic_tools() -> list:
@@ -670,6 +589,7 @@ def get_all_tools() -> list:
         WeatherTool(),
         AmapAttractionTool(),
         AmapWeatherTool(),
+        RollingGoHotelTool(),
         AmapHotelTool(),
         AmapRouteTool(),
     ]
@@ -684,7 +604,7 @@ def get_all_tools() -> list:
 
 
 def get_amap_tools() -> list:
-    """获取所有高德地图MCP工具"""
+    """获取高德地图相关工具"""
     return [
         AmapAttractionTool(),
         AmapWeatherTool(),
@@ -814,10 +734,10 @@ class SmartAttractionTool(BaseTool):
     智能景点搜索工具
     优先 HybridRAG + BGE Rerank 从知识库精排，再用高德补充坐标/地址。
     """
-    name: str = "智能景点搜索"
+    name: str = "smart_attraction_search"
     description: str = (
-        "智能搜索景点：优先用知识库 HybridRAG+BGE Rerank 精排推荐，"
-        "再用高德地图补充真实坐标与地址，返回建议游览时长等完整字段。"
+        "智能搜索景点（优先使用）：知识库 HybridRAG+BGE Rerank 精排，"
+        "再用高德补充坐标与地址，含建议游览时长等字段。"
     )
     args_schema: type = SmartAttractionSearchInput
 
@@ -905,46 +825,8 @@ class SmartAttractionTool(BaseTool):
         return results or [], meta or {}
 
     def _search_amap(self, city: str, keywords: str) -> list:
-        """使用高德搜索景点（MCP优先，失败则 REST API）"""
-        pois = self._search_amap_mcp(city, keywords)
-        if pois:
-            return pois
+        """高德搜索景点：Streamable HTTP MCP，失败则 REST。"""
         return self._search_amap_rest(city, keywords)
-
-    def _search_amap_mcp(self, city: str, keywords: str) -> list:
-        try:
-            from app.tools.mcp_tools import MCPToolManager, settings
-
-            manager = MCPToolManager()
-            if "amap" not in manager:
-                if settings.amap_api_key and settings.enable_mcp_tools:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True,
-                    )
-                else:
-                    return []
-
-            amap_tool = manager.get_tool("amap")
-            if not amap_tool:
-                return []
-
-            result = amap_tool.invoke(
-                name="maps_text_search",
-                arguments={
-                    "keywords": keywords or "景点",
-                    "city": city,
-                    "citylimit": "true",
-                },
-            )
-            if result and "pois" in result:
-                return result["pois"][:12]
-            return []
-        except Exception:
-            return []
 
     def _search_amap_rest(self, city: str, keywords: str) -> list:
         try:
@@ -1011,11 +893,10 @@ class RAGAttractionTool(BaseTool):
     使用向量数据库检索知识库中的景点信息进行推荐
     采用 Hybrid RAG 策略：向量检索 + BM25 + CrossEncoder Rerank 精排
     """
-    name: str = "RAG景点推荐"
+    name: str = "rag_attraction_search"
     description: str = (
-        "从知识库中检索景点信息进行智能推荐，支持按城市和关键词搜索。"
-        "采用向量检索+BM25混合检索，并通过BGE Rerank精排提升相关性，"
-        "返回与查询最相关的Top景点（含票价、地址、建议游览时长、简介等）。"
+        "仅从知识库检索景点（评分、票价、开放时间、建议游览时长、简介）。"
+        "向量检索+BM25，BGE Rerank 精排。不含实时高德坐标。"
     )
     args_schema: type = RAGAttractionSearchInput
 
@@ -1088,7 +969,8 @@ def get_weather_tools() -> list:
 
 
 def get_hotel_tools() -> list:
-    """获取酒店搜索相关工具"""
+    """酒店推荐 Agent 的工具：RollingGo 主搜，高德仅作位置兜底。"""
     return [
+        RollingGoHotelTool(),
         AmapHotelTool(),
     ]

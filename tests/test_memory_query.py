@@ -1,5 +1,5 @@
 """
-旅行记忆查询功能测试脚本（简化版，不依赖langchain）
+旅行记忆查询功能测试脚本（不依赖 langchain）
 验证日期筛选、预算筛选、景点筛选和统计分析功能
 """
 
@@ -8,11 +8,11 @@ import os
 import json
 from datetime import datetime, timedelta
 
-# 直接导入 memory_manager，避免触发 app/__init__.py 的依赖
-sys.path.insert(0, 'd:/Projects/LangChain')
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 # 手动导入模块，避免触发 app/__init__.py
-module_path = 'd:/Projects/LangChain/app/memory/memory_manager.py'
+module_path = os.path.join(ROOT, "app", "memory", "memory_manager.py")
 import importlib.machinery
 loader = importlib.machinery.SourceFileLoader("memory_manager", module_path)
 memory_manager_module = loader.load_module()
@@ -331,7 +331,7 @@ def main():
     print("=" * 60)
     
     # 初始化管理器（使用文件存储，不需要Redis）
-    storage_path = "d:/Projects/LangChain/app/data/travel_plans"
+    storage_path = os.path.join(ROOT, "app", "data", "travel_plans")
     os.makedirs(storage_path, exist_ok=True)
     
     manager = TravelMemoryManager(use_redis=False)

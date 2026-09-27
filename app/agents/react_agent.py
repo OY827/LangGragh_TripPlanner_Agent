@@ -1,35 +1,40 @@
-from typing import List, Optional, Dict, Any, Callable
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from typing import List, Dict, Any
+from uuid import uuid4
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from app.llm import get_llm
 from app.monitoring import get_metrics, get_logger, Timer
 
 
+def _message_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("text"):
+                parts.append(str(block.get("text")))
+        return "\n".join(parts)
+    return str(content)
+
+
 class ReActAgent:
     """
-    ReAct Agent - 支持工具调用的推理 Agent
-    
-    使用 ReAct（Reasoning + Acting）范式：
-    1. 思考：分析问题，决定是否需要调用工具
-    2. 行动：调用工具执行操作
-    3. 观察：获取工具返回结果
-    4. 总结：基于结果给出最终回答
-    
-    适用于：
-    - 需要调用外部工具的任务
-    - 多步骤推理任务
-    - 需要获取实时信息的任务
-    
-    使用示例：
-        tools = [CalculatorTool(), SearchTool()]
-        agent = ReActAgent(
-            name="景点搜索专家",
-            tools=tools,
-            system_prompt="你是景点搜索专家..."
-        )
-        result = agent.run("帮我搜索北京的景点")
+    带工具的推理 Agent，使用模型原生 function calling（bind_tools）。
+
+    循环：
+    1. llm.bind_tools(tools).invoke(messages)
+    2. 若 AIMessage.tool_calls 非空，执行对应 BaseTool，把结果以 ToolMessage 回填
+    3. 没有 tool_calls 时，把模型文本当作最终答案
+
+    适用于需要实时数据的景点 / 天气 / 酒店专家。规划师用 SimpleAgent，不走这里。
     """
-    
+
     def __init__(
         self,
         name: str,
@@ -43,21 +48,6 @@ class ReActAgent:
         verbose: bool = True,
         enable_monitoring: bool = True
     ):
-        """
-        初始化 ReActAgent
-        
-        Args:
-            name: Agent 名称
-            tools: 工具列表
-            llm: 预初始化的 LLM 实例（可选）
-            system_prompt: 系统提示词
-            provider: LLM 提供商
-            model: 模型名称
-            temperature: 温度参数
-            max_iterations: 最大迭代次数
-            verbose: 是否输出详细日志
-            enable_monitoring: 是否启用监控
-        """
         self.name = name
         self.tools = tools
         self.tool_names = {tool.name: tool for tool in tools}
@@ -68,148 +58,127 @@ class ReActAgent:
         self.max_iterations = max_iterations
         self.verbose = verbose
         self.enable_monitoring = enable_monitoring
-        
+
         if llm is not None:
             self.llm = llm
         else:
             self.llm = get_llm(provider=provider, model=model, temperature=temperature)
-        
-        # 构建默认的 ReAct 提示词
-        self._build_react_prompt()
-        
-        # 初始化监控模块
+
+        self._bind_llm()
+
         if self.enable_monitoring:
             self._metrics = get_metrics()
             self._logger = get_logger(self.name)
-        
+
         if self.verbose:
             print(f"✅ 创建 ReActAgent: {self.name}")
             print(f"   工具: {list(self.tool_names.keys())}")
-    
-    def _build_react_prompt(self):
-        """构建 ReAct 风格的系统提示词"""
-        tools_desc = self._format_tools_description()
-        tool_names = ", ".join(self.tool_names.keys())
-        
-        default_prompt = f"""你是一个使用 ReAct（推理+行动）方法解决问题的AI助手。
+            print("   调用方式: 原生 tool calling")
 
-你可以使用以下工具：
-{tools_desc}
-
-请使用以下格式：
-
-问题：你需要回答的输入问题
-思考：你应该思考该做什么
-行动：要执行的操作，应该是[{tool_names}]中的一个
-行动输入：行动的输入参数
-观察：行动的结果
-...（这个思考/行动/行动输入/观察可以重复N次）
-思考：我现在知道最终答案了
-最终答案：原始输入问题的最终答案
-
-开始！"""
-        
-        # 如果有自定义系统提示词，添加到默认提示词前面
-        if self.system_prompt:
-            self.react_prompt = f"{self.system_prompt}\n\n{default_prompt}"
+    def _bind_llm(self):
+        """bind_tools 返回新 runnable，不会改掉 get_llm 缓存的那份 ChatOpenAI。"""
+        if self.tools:
+            self.llm_with_tools = self.llm.bind_tools(self.tools)
         else:
-            self.react_prompt = default_prompt
-    
+            self.llm_with_tools = self.llm
+
+    def _build_system_prompt(self) -> str:
+        tools_desc = self._format_tools_description()
+        protocol = (
+            "你通过 API 原生 function calling 使用工具，不要输出「思考：」「行动：」这类文本格式。"
+            "需要实时或外部数据时必须调用工具，不要编造。"
+            "工具结果足够后，用中文直接给出最终答案。"
+        )
+        if self.tools:
+            protocol += f"\n\n可用工具：\n{tools_desc}"
+        if self.system_prompt:
+            return f"{self.system_prompt.strip()}\n\n{protocol}"
+        return protocol
+
     def _format_tools_description(self) -> str:
-        """格式化工具描述"""
-        tools_desc = []
-        for tool in self.tools:
-            tools_desc.append(f"{tool.name}: {tool.description}")
-        return "\n".join(tools_desc)
-    
-    def _parse_llm_output(self, text: str) -> Dict[str, str]:
-        """解析 LLM 输出"""
-        lines = text.strip().split("\n")
-        result = {
-            "thought": "",
-            "action": "",
-            "action_input": "",
-            "final_answer": ""
-        }
-        
-        in_final_answer = False
-        final_answer_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            
-            if line.startswith("思考："):
-                result["thought"] = line.replace("思考：", "").strip()
-            elif line.startswith("行动："):
-                result["action"] = line.replace("行动：", "").strip()
-            elif line.startswith("行动输入："):
-                result["action_input"] = line.replace("行动输入：", "").strip()
-            elif line.startswith("最终答案："):
-                in_final_answer = True
-                final_answer_lines.append(line.replace("最终答案：", "").strip())
-            elif in_final_answer:
-                final_answer_lines.append(line)
-        
-        if final_answer_lines:
-            result["final_answer"] = "\n".join(final_answer_lines).strip()
-        
-        return result
-    
-    def _execute_action(self, action_name: str, action_input: str) -> str:
-        """执行工具调用"""
-        if action_name not in self.tool_names:
-            return f"错误：未找到工具 '{action_name}'。可用工具：{list(self.tool_names.keys())}"
-        
-        tool = self.tool_names[action_name]
-        try:
+        return "\n".join(f"- {tool.name}: {tool.description}" for tool in self.tools)
+
+    def _get_tool_calls(self, response: AIMessage) -> List[Dict[str, Any]]:
+        calls = getattr(response, "tool_calls", None) or []
+        if calls:
+            return list(calls)
+
+        extra = getattr(response, "additional_kwargs", None) or {}
+        raw = extra.get("tool_calls")
+        if not raw and extra.get("function_call"):
+            raw = [{"id": extra.get("tool_call_id") or str(uuid4()), "function": extra["function_call"]}]
+        parsed = []
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") or {}
+            parsed.append({
+                "name": item.get("name") or fn.get("name") or "",
+                "args": item.get("args") if item.get("args") is not None else fn.get("arguments") or {},
+                "id": item.get("id") or str(uuid4()),
+            })
+        return parsed
+
+    def _execute_tool_call(self, call: Dict[str, Any]) -> str:
+        name = (call.get("name") or "").strip()
+        args = call.get("args")
+        if isinstance(args, str):
             import json
             try:
-                input_dict = json.loads(action_input)
-                if isinstance(input_dict, dict):
-                    from langchain_core.tools import StructuredTool
-                    if isinstance(tool, StructuredTool):
-                        result = tool.invoke(input_dict)
-                    else:
-                        result = tool._run(**input_dict)
-                else:
-                    result = tool._run(action_input)
+                args = json.loads(args) if args else {}
             except json.JSONDecodeError:
-                result = tool._run(action_input)
-            
+                args = {"input": args}
+
+        tool = self.tool_names.get(name)
+        if tool is None:
+            for tool_name, candidate in self.tool_names.items():
+                if tool_name in name or name in tool_name:
+                    tool = candidate
+                    break
+        if tool is None:
+            return f"错误：未找到工具 '{name}'。可用工具：{list(self.tool_names.keys())}"
+
+        try:
+            if isinstance(args, dict):
+                result = tool.invoke(args)
+            elif args in (None, ""):
+                result = tool.invoke({})
+            else:
+                result = tool.invoke(args)
             return str(result)
         except Exception as e:
             return f"执行工具时出错：{str(e)}"
-    
+
     def run(self, query: str) -> str:
-        """执行推理任务（支持工具调用）"""
-        history = ""
-        
+        """执行推理任务（原生 tool calling）。"""
+        messages: List[Any] = [
+            SystemMessage(content=self._build_system_prompt()),
+            HumanMessage(content=query),
+        ]
+
         if self.verbose:
             print(f"\n{'='*60}")
             print(f"Agent: {self.name}")
             print(f"问题：{query}")
             print(f"{'='*60}")
-        
+
         if self.enable_monitoring:
             self._metrics.increment_concurrent_requests()
             self._logger.log_request("unknown", query)
-        
+
         total_timer = Timer("total_latency")
         total_timer.__enter__()
-        
+        last_text = ""
+
         try:
             for iteration in range(self.max_iterations):
                 if self.verbose:
                     print(f"\n[迭代 {iteration + 1}/{self.max_iterations}]")
-                
-                prompt = f"{self.react_prompt}\n\n问题：{query}\n思考：{history}"
-                messages = [HumanMessage(content=prompt)]
-                
+
                 llm_timer = Timer("llm_latency")
                 llm_timer.__enter__()
                 try:
-                    response = self.llm.invoke(messages)
-                    response_text = response.content
+                    response = self.llm_with_tools.invoke(messages)
                     if self.enable_monitoring:
                         self._metrics.record_api_call("llm")
                         self._logger.log_llm_call(
@@ -220,71 +189,82 @@ class ReActAgent:
                         )
                 finally:
                     llm_timer.__exit__(None, None, None)
-                
+
+                messages.append(response)
+                text = _message_text(getattr(response, "content", "")).strip()
+                last_text = text
+                tool_calls = self._get_tool_calls(response)
+
                 if self.verbose:
-                    print(f"LLM 响应:\n{response_text}")
-                
-                parsed = self._parse_llm_output(response_text)
-                
-                if parsed["final_answer"]:
+                    preview = text[:500] if text else "(无文本，可能仅有 tool_calls)"
+                    print(f"LLM 响应:\n{preview}")
+                    if tool_calls:
+                        print(f"tool_calls: {[c.get('name') for c in tool_calls]}")
+
+                if not tool_calls:
+                    if text:
+                        if self.verbose:
+                            print(f"\n{'='*60}")
+                            print(f"最终答案：{text}")
+                            print(f"{'='*60}\n")
+                        if self.enable_monitoring:
+                            self._metrics.increment_success()
+                            self._logger.log_agent_step(
+                                agent_name=self.name,
+                                step=f"iteration_{iteration}",
+                                action="finish",
+                                input_data=query,
+                                output_data=text,
+                            )
+                        return text
+                    break
+
+                for call in tool_calls:
+                    call_id = call.get("id") or call.get("tool_call_id") or str(uuid4())
+                    call_name = call.get("name") or ""
                     if self.verbose:
-                        print(f"\n{'='*60}")
-                        print(f"最终答案：{parsed['final_answer']}")
-                        print(f"{'='*60}\n")
-                    if self.enable_monitoring:
-                        self._metrics.increment_success()
-                        self._logger.log_agent_step(
-                            agent_name=self.name,
-                            step=f"iteration_{iteration}",
-                            action="finish",
-                            input_data=query,
-                            output_data=parsed["final_answer"]
-                        )
-                    return parsed["final_answer"]
-                
-                if parsed["action"] and parsed["action_input"]:
-                    if self.verbose:
-                        print(f"行动：{parsed['action']}")
-                        print(f"行动输入：{parsed['action_input']}")
-                    
+                        print(f"行动：{call_name}")
+                        print(f"行动输入：{call.get('args')}")
+
                     tool_timer = Timer("tool_latency")
                     tool_timer.__enter__()
                     try:
-                        observation = self._execute_action(parsed["action"], parsed["action_input"])
+                        observation = self._execute_tool_call(call)
                         if self.enable_monitoring:
                             self._metrics.record_api_call("tool")
                             is_success = not observation.startswith("错误") and not observation.startswith("执行工具时出错")
                             self._logger.log_tool_call(
-                                tool_name=parsed["action"],
-                                input_data=parsed["action_input"],
+                                tool_name=call_name,
+                                input_data=str(call.get("args")),
                                 output_data=observation,
                                 latency=tool_timer.elapsed(),
-                                success=is_success
+                                success=is_success,
                             )
                     finally:
                         tool_timer.__exit__(None, None, None)
-                    
+
                     if self.verbose:
-                        print(f"观察：{observation}")
-                    
-                    history += f"{parsed['thought']}\n行动：{parsed['action']}\n行动输入：{parsed['action_input']}\n观察：{observation}\n"
-                else:
-                    if parsed["thought"]:
-                        history += f"{parsed['thought']}\n"
-                    else:
-                        history += response_text + "\n"
-            
+                        print(f"观察：{observation[:500]}")
+
+                    tool_msg_kwargs = {
+                        "content": observation,
+                        "tool_call_id": str(call_id),
+                    }
+                    if call_name:
+                        tool_msg_kwargs["name"] = call_name
+                    messages.append(ToolMessage(**tool_msg_kwargs))
+
             if self.verbose:
                 print(f"\n{'='*60}")
                 print(f"已达到最大迭代次数 ({self.max_iterations})")
                 print(f"{'='*60}\n")
-            
+
             if self.enable_monitoring:
                 self._metrics.increment_error()
                 self._logger.log_error("max_iterations", f"达到最大迭代次数 {self.max_iterations}")
-            
-            return f"我无法在 {self.max_iterations} 次迭代内完成任务。最后响应是：{response_text}"
-        
+
+            return last_text or f"我无法在 {self.max_iterations} 次迭代内完成任务。"
+
         except Exception as e:
             if self.enable_monitoring:
                 self._metrics.increment_error()
@@ -294,20 +274,20 @@ class ReActAgent:
             total_timer.__exit__(None, None, None)
             if self.enable_monitoring:
                 self._metrics.decrement_concurrent_requests()
-    
+
     def add_tool(self, tool: BaseTool):
-        """添加工具"""
+        """添加工具并重新 bind_tools。"""
         self.tools.append(tool)
         self.tool_names[tool.name] = tool
-        self._build_react_prompt()  # 重新构建提示词
-    
+        self._bind_llm()
+
     def remove_tool(self, tool_name: str):
-        """移除工具"""
+        """移除工具并重新 bind_tools。"""
         if tool_name in self.tool_names:
             tool = self.tool_names.pop(tool_name)
             self.tools.remove(tool)
-            self._build_react_prompt()  # 重新构建提示词
-    
+            self._bind_llm()
+
     def __repr__(self) -> str:
         return f"ReActAgent(name='{self.name}', tools={list(self.tool_names.keys())})"
 
@@ -323,23 +303,6 @@ def create_react_agent(
     verbose: bool = True,
     enable_monitoring: bool = True
 ) -> ReActAgent:
-    """
-    创建 ReActAgent 的便捷函数
-    
-    Args:
-        name: Agent 名称
-        tools: 工具列表
-        system_prompt: 系统提示词
-        provider: LLM 提供商
-        model: 模型名称
-        temperature: 温度参数
-        max_iterations: 最大迭代次数
-        verbose: 是否输出日志
-        enable_monitoring: 是否启用监控
-        
-    Returns:
-        ReActAgent 实例
-    """
     return ReActAgent(
         name=name,
         tools=tools,

@@ -6,8 +6,7 @@ import requests
 # 导入统一的数据模型
 from app.models import POIInfo, AmapWeatherInfo, AmapRouteInfo, Location
 
-# 导入MCP工具
-from app.tools import MCPToolManager, settings
+from app.services.amap_mcp_service import get_amap_mcp_service, is_amap_mcp_enabled
 
 # 加载环境变量
 load_dotenv()
@@ -36,40 +35,42 @@ class AmapService:
         """初始化服务"""
         self.api_key = get_amap_api_key()
         self._use_real_api = bool(self.api_key)
-        self._use_mcp = os.getenv("USE_MCP", "false").lower() == "true"
-        self._mcp_tool = None
-        
-        # 仅当启用 MCP 时尝试导入
-        if self._use_mcp:
-            try:
-                from app.tools import MCPToolManager, settings
-                manager = MCPToolManager()
-                if settings.amap_api_key:
-                    manager.register_tool(
-                        name="amap",
-                        description="高德地图服务",
-                        server_command=["python", "-m", "amap_mcp_server"],
-                        env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                        auto_expand=True
-                    )
-                    self._mcp_tool = manager.get_tool("amap")
-            except Exception as e:
-                print(f"MCP工具初始化失败，将使用直接API调用: {str(e)}")
-                self._use_mcp = False
-        
+        self._use_mcp = False
+        self._mcp_warned = False
+
+        if is_amap_mcp_enabled():
+            mcp = get_amap_mcp_service()
+            if mcp.is_configured():
+                self._use_mcp = True
+            else:
+                print("高德 MCP 已打开但未配置 AMAP_MCP_URL / AMAP_MAPS_API_KEY，将使用 REST")
+
         self._initialized = True
         print(f"高德地图服务初始化完成 - 使用真实API: {self._use_real_api}, 使用MCP: {self._use_mcp}")
-    
+
+    @staticmethod
+    def _mcp_ok(result: Any) -> bool:
+        if not result or not isinstance(result, dict):
+            return False
+        if result.get("error"):
+            return False
+        if str(result.get("status")) == "0":
+            return False
+        return True
+
     def _call_mcp_tool(self, tool_name: str, **kwargs) -> Any:
-        """调用MCP工具"""
-        if self._mcp_tool:
-            try:
-                return self._mcp_tool.invoke(name=tool_name, arguments=kwargs)
-            except Exception as e:
-                # 只在第一次失败时打印警告
-                if not getattr(self, '_mcp_warned', False):
-                    print(f"⚠️ MCP工具调用失败，将使用直接API调用")
-                    self._mcp_warned = True
+        """调用 Streamable HTTP 高德 MCP；失败返回 None，由 REST 兜底。"""
+        if not self._use_mcp:
+            return None
+        try:
+            mcp = get_amap_mcp_service()
+            result = mcp.call_tool(tool_name, kwargs)
+            if self._mcp_ok(result):
+                return result
+        except Exception:
+            if not self._mcp_warned:
+                print("⚠️ 高德 MCP 调用失败，将使用 REST API")
+                self._mcp_warned = True
         return None
     
     def search_poi(self, keywords: str, city: str, citylimit: bool = True) -> List[POIInfo]:
@@ -85,15 +86,17 @@ class AmapService:
             POI信息列表
         """
         if self._use_mcp:
-            result = self._call_mcp_tool(
-                "maps_text_search",
-                keywords=keywords,
-                city=city,
-                citylimit=str(citylimit).lower()
-            )
-            if result and "error" not in result:
-                pois = result.get("pois", [])
-                return [POIInfo.from_amap_response(poi) for poi in pois]
+            try:
+                mcp = get_amap_mcp_service()
+                result = mcp.text_search(keywords=keywords, city=city, citylimit=citylimit)
+                if self._mcp_ok(result):
+                    pois = mcp.extract_pois(result)
+                    if pois:
+                        return [POIInfo.from_amap_response(poi) for poi in pois]
+            except Exception:
+                if not self._mcp_warned:
+                    print("⚠️ 高德 MCP POI 解析失败，将使用 REST API")
+                    self._mcp_warned = True
         
         # 降级到直接API调用或模拟数据
         if self._use_real_api:
@@ -165,8 +168,11 @@ class AmapService:
         """
         if self._use_mcp:
             result = self._call_mcp_tool("maps_search_detail", id=poi_id)
-            if result and "error" not in result:
-                return POIInfo.from_amap_response(result)
+            if self._mcp_ok(result):
+                payload = result
+                if isinstance(result.get("pois"), list) and result["pois"]:
+                    payload = result["pois"][0]
+                return POIInfo.from_amap_response(payload)
         
         if self._use_real_api:
             return self._get_poi_detail_real(poi_id)
@@ -223,11 +229,10 @@ class AmapService:
         """
         if self._use_mcp:
             result = self._call_mcp_tool("maps_weather", city=city)
-            if result and "error" not in result:
-                # MCP 返回格式: {"city": "...", "forecasts": [...]}
-                forecasts = result.get("forecasts", [])
+            if self._mcp_ok(result):
+                forecasts = result.get("forecasts") or []
+                lives = result.get("lives") or []
                 if forecasts:
-                    # 取今天的预报数据
                     today = forecasts[0]
                     return AmapWeatherInfo(
                         city=result.get("city", city),
@@ -235,8 +240,19 @@ class AmapService:
                         temperature=f"{today.get('daytemp', '')}°C",
                         wind_direction=today.get("daywind"),
                         wind_power=today.get("daypower"),
-                        humidity=None,  # 预报数据没有湿度
+                        humidity=None,
                         report_time=today.get("date")
+                    )
+                if lives:
+                    live = lives[0]
+                    return AmapWeatherInfo(
+                        city=live.get("city", city),
+                        weather=live.get("weather", ""),
+                        temperature=f"{live.get('temperature', '')}°C",
+                        wind_direction=live.get("winddirection"),
+                        wind_power=live.get("windpower"),
+                        humidity=live.get("humidity"),
+                        report_time=live.get("reporttime")
                     )
         
         if self._use_real_api:
@@ -302,11 +318,12 @@ class AmapService:
             包含坐标信息的字典
         """
         if self._use_mcp:
-            result = self._call_mcp_tool("maps_geo", address=address, city=city or "")
-            if result and "error" not in result:
-                # MCP 返回格式: {"return": [{"location": "...", ...}]}
-                if "return" in result and len(result["return"]) > 0:
-                    return result["return"][0]
+            mcp = get_amap_mcp_service()
+            result = mcp.geo(address, city or "")
+            if self._mcp_ok(result):
+                item = mcp.extract_geocode(result)
+                if item:
+                    return item
                 return result
         
         if self._use_real_api:
@@ -364,8 +381,12 @@ class AmapService:
         """
         if self._use_mcp:
             result = self._call_mcp_tool("maps_regeocode", location=location)
-            if result and "error" not in result:
-                # MCP 返回格式: {"province": "...", "city": "...", "district": "..."}
+            if self._mcp_ok(result):
+                if isinstance(result.get("addressComponent"), dict):
+                    return result["addressComponent"]
+                regeo = result.get("regeocode")
+                if isinstance(regeo, dict) and isinstance(regeo.get("addressComponent"), dict):
+                    return regeo["addressComponent"]
                 return result
         
         if self._use_real_api:
@@ -417,32 +438,19 @@ class AmapService:
             路线信息对象
         """
         if self._use_mcp:
-            tool_name = {
-                "driving": "maps_direction_driving_by_address",
-                "walking": "maps_direction_walking_by_address",
-                "transit": "maps_direction_transit_integrated_by_address"
-            }.get(mode, "maps_direction_driving_by_address")
-
-            mcp_kwargs = {
-                "origin_address": origin,
-                "destination_address": destination,
-            }
-            # 公交/地铁模式需要城市参数
-            if mode == "transit" and city:
-                mcp_kwargs["origin_city"] = city
-                mcp_kwargs["destination_city"] = city
-            elif mode == "transit":
-                mcp_kwargs["origin_city"] = "全国"
-                mcp_kwargs["destination_city"] = "全国"
-
-            result = self._call_mcp_tool(tool_name, **mcp_kwargs)
-            if result and "error" not in result:
-                route_data = result.get("route", {})
+            mcp = get_amap_mcp_service()
+            result = mcp.direction(origin, destination, mode, city)
+            if self._mcp_ok(result):
+                route_data = result.get("route") if isinstance(result.get("route"), dict) else result
+                if not isinstance(route_data, dict):
+                    route_data = {}
+                paths = route_data.get("paths") or []
+                first_path = paths[0] if paths else {}
                 return AmapRouteInfo(
                     origin=route_data.get("origin", origin),
                     destination=route_data.get("destination", destination),
-                    distance=route_data.get("distance"),
-                    duration=route_data.get("duration"),
+                    distance=route_data.get("distance") or first_path.get("distance"),
+                    duration=route_data.get("duration") or first_path.get("duration"),
                     paths=route_data.get("paths"),
                     transits=route_data.get("transits")
                 )

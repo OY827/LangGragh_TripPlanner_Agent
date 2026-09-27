@@ -9,7 +9,8 @@ import json
 import shutil
 from datetime import datetime
 
-sys.path.insert(0, 'd:/Projects/LangChain')
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from app.agents.dialog_models import (
     PlanVersion, DialogSession, ChangeIntent, PlanDiff,

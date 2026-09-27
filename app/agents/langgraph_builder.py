@@ -413,6 +413,8 @@ class TripPlannerAgent:
             "preferences": preferences or [],
             "user_id": user_id,
             "free_text_input": free_text_input,
+            "dialog_active": False,
+            "max_iterations": 3,
         }
 
     async def aplan_trip(

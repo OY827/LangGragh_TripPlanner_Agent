@@ -12,7 +12,7 @@ from app.models import (
     WeatherInfo, Location, Hotel, Budget, RouteSegment, TimeSlot
 )
 from app.llm import get_llm
-from app.tools import get_basic_tools, get_all_tools, get_attraction_tools, get_weather_tools, get_hotel_tools, MCPToolManager, settings
+from app.tools import get_basic_tools, get_all_tools, get_attraction_tools, get_weather_tools, get_hotel_tools
 from app.prompts import get_prompt_manager
 
 try:
@@ -59,11 +59,8 @@ class MultiAgentTripPlanner:
             print("  - 加载基础工具...")
             self.basic_tools = get_basic_tools()
             
-            # 初始化 MCP 工具管理器
-            print("  - 初始化 MCP 工具管理器...")
-            self.mcp_manager = MCPToolManager()
-            
-            # 创建 MCP 工具（高德地图）
+            # 高德 MCP：Streamable HTTP，不再起本地 stdio 进程
+            print("  - 初始化高德 MCP（Streamable HTTP）...")
             self._setup_mcp_tools()
             
             # 初始化旅行记忆管理器
@@ -129,21 +126,23 @@ class MultiAgentTripPlanner:
             return None
     
     def _setup_mcp_tools(self):
-        """设置 MCP 工具"""
+        """高德 MCP 走 Streamable HTTP，景点/天气/路线工具内部调用 AmapService。"""
         try:
-            if settings.enable_mcp_tools and settings.amap_api_key:
-                print("  - 注册高德地图 MCP 工具...")
-                self.mcp_manager.register_tool(
-                    name="amap",
-                    description="高德地图服务 - 提供地理编码、逆地理编码、POI 搜索、路径规划等功能",
-                    server_command=["python", "-m", "amap_mcp_server"],
-                    env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
-                    auto_expand=True
-                )
-                print("  ✓ 高德地图 MCP 工具注册成功")
+            from app.services.amap_mcp_service import (
+                get_amap_mcp_service,
+                is_amap_mcp_enabled,
+            )
+
+            self.amap_tool = None
+            if not is_amap_mcp_enabled():
+                print("  ⚠ 高德 MCP 未启用（USE_MCP / ENABLE_MCP_TOOLS）")
+                return
+            mcp = get_amap_mcp_service()
+            if mcp.is_configured():
+                self.amap_tool = mcp
+                print("  ✓ 高德地图 MCP 已启用（Streamable HTTP）")
             else:
-                print("  ⚠ 高德地图 MCP 工具未启用（请检查 ENABLE_MCP_TOOLS 和 AMAP_MAPS_API_KEY）")
-                self.amap_tool = None
+                print("  ⚠ 高德 MCP 已打开但未配置 AMAP_MCP_URL / AMAP_MAPS_API_KEY")
         except Exception as e:
             print(f"  ⚠ MCP 工具设置失败: {str(e)}")
             self.amap_tool = None
@@ -175,9 +174,10 @@ class MultiAgentTripPlanner:
         )
     
     def _create_hotel_agent(self) -> ReActAgent:
-        """创建酒店推荐 Agent（使用渐进式提示词+记忆技能）"""
+        """创建酒店推荐 Agent：绑定 RollingGo hotel_search 工具。"""
         hotel_tools = get_hotel_tools()
         prompt = self.prompt_manager.get_agent_prompt("hotel")
+        print(f"  ✓ 酒店推荐 Agent 工具: {[t.name for t in hotel_tools]}")
         return ReActAgent(
             name="酒店推荐专家",
             tools=hotel_tools,
@@ -258,11 +258,25 @@ class MultiAgentTripPlanner:
             print("🗺️ 步骤4: 路线规划...")
             route_info = self._build_route_info(request, attraction_response)
             print(f"路线规划结果: {route_info[:200]}...\n")
+
+            # 步骤4b: 攻略库参考（只给规划器，不进入景点候选）
+            print("📖 步骤4b: 检索参考攻略...")
+            guide_info = self._get_guide_reference(request)
+            if guide_info:
+                print(f"参考攻略: {guide_info[:200]}...\n")
+            else:
+                print("参考攻略: 无（该城市攻略库为空或检索失败）\n")
             
             # 步骤5: 行程规划 Agent 整合信息生成详细计划
             print("📋 步骤5: 行程规划 Agent 生成详细计划...")
             planner_query = self._build_planner_query(
-                request, attraction_response, weather_response, hotel_response, memory_info, route_info
+                request,
+                attraction_response,
+                weather_response,
+                hotel_response,
+                memory_info,
+                route_info,
+                guide_info,
             )
             planner_response = self.planner_agent.run(planner_query)
             print(f"行程规划结果: {planner_response[:300]}...\n")
@@ -386,12 +400,14 @@ class MultiAgentTripPlanner:
 搜索信息：
 - 城市：{request.city}
 - 住宿类型：{request.accommodation}
+- 入住日期：{request.start_date}
+- 住宿晚数：{max(1, request.travel_days - 1)}
 
 要求：
-1. 只搜索酒店，不要搜索景点或其他地点
-2. 优先搜索有评分和价格信息的酒店
-3. 返回酒店名称、地址、价格、评分等信息
-4. 如果搜索结果中没有足够的有评分酒店，可以尝试不同的关键词"""
+1. 必须调用 hotel_search 工具，不要自己编造
+2. 参数带上 city、keywords、check_in_date、stay_nights
+3. 返回酒店名称、地址、价格、评分/星级
+4. 只保留有价格的结果"""
         
         return query
     
@@ -545,6 +561,51 @@ class MultiAgentTripPlanner:
         except Exception:
             return distance, 20
     
+    def _get_guide_reference(self, request: TripRequest, top_k: int = 3) -> str:
+        """从 travel_guides 取参考攻略文本。失败或无数据时返回空串。"""
+        try:
+            from app.rag.retriever import KnowledgeRetriever
+
+            if getattr(self, "_guide_retriever", None) is None:
+                self._guide_retriever = KnowledgeRetriever()
+            prefs = " ".join(request.preferences or [])
+            query = f"{request.city} {request.travel_days}天 {prefs} 旅行攻略 路线建议".strip()
+            hits = self._guide_retriever.retrieve_guides(
+                query=query,
+                city=request.city,
+                top_k=top_k,
+            )
+            return MultiAgentTripPlanner._format_guide_hits(hits)
+        except Exception as e:
+            print(f"  ⚠ 攻略检索跳过: {e}")
+            return ""
+
+    @staticmethod
+    def _format_guide_hits(hits: Optional[List[Dict[str, Any]]], max_chars: int = 650) -> str:
+        if not hits:
+            return ""
+        parts = [
+            "仅供片区串线、每日节奏、餐饮时段参考。"
+            "不得把下文出现但「景点信息」中没有的地点写入行程；"
+            "禁止采用其中的票价、开放时间、酒店报价。"
+        ]
+        for i, hit in enumerate(hits, 1):
+            meta = hit.get("metadata") or {}
+            title = meta.get("title") or f"攻略{i}"
+            section = meta.get("section") or meta.get("category") or "攻略"
+            source = meta.get("source") or ""
+            year = meta.get("source_year") or ""
+            header = f"{i}. [{section}] {title}"
+            extras = [x for x in (f"来源:{source}" if source else "", f"年份约{year}" if year else "") if x]
+            if extras:
+                header += "  (" + "，".join(extras) + ")"
+            snippet = (hit.get("content") or "").replace("\n", " ").strip()
+            if len(snippet) > max_chars:
+                snippet = snippet[:max_chars] + "..."
+            parts.append(header)
+            parts.append(snippet)
+        return "\n".join(parts)
+
     def _build_planner_query(
         self, 
         request: TripRequest, 
@@ -552,7 +613,8 @@ class MultiAgentTripPlanner:
         weather: str, 
         hotels: str = "",
         memory_info: str = "",
-        route_info: str = ""
+        route_info: str = "",
+        guide_info: str = "",
     ) -> str:
         """构建行程规划查询"""
         memory_section = ""
@@ -562,6 +624,10 @@ class MultiAgentTripPlanner:
         route_section = ""
         if route_info:
             route_section = f"\n**路线信息:**\n{route_info}\n"
+
+        guide_section = ""
+        if guide_info:
+            guide_section = f"\n**参考攻略:**\n{guide_info}\n"
         
         query = f"""请根据以下信息生成{request.city}的{request.travel_days}天旅行计划:
 
@@ -577,6 +643,7 @@ class MultiAgentTripPlanner:
 **景点信息:**
 {attractions}
 
+{guide_section}
 **天气信息:**
 {weather}
 
@@ -586,15 +653,16 @@ class MultiAgentTripPlanner:
 
 **要求:**
 1. 【强制】行程景点名称必须来自上方「景点信息」候选列表，禁止编造未出现的景点；可筛选排序，不可新增列表外景点
-2. 按可游玩时段排满全天（约09:00-21:00），根据景点visit_duration累加安排；每天建议3-5个景点（大型景区可2-3个），避免日程空档
-3. 每天必须包含早中晚三餐，并安排合适的就餐时间
-4. 每天推荐一个具体的酒店(从酒店信息中选择或合理推荐)
-5. 考虑景点之间的距离和交通方式，规划合理的游览顺序
-6. 必须为每个景点规划具体的时间安排（开始时间+visit_duration）；优先复制候选中的建议游览时长与坐标
-7. 必须规划景点之间的交通方式和交通时间；若上文提供了高德真实路线数据，必须采用其距离与时长
-8. 返回完整的JSON格式数据，包含time_slots和route_segments字段
-9. 景点的经纬度坐标要真实准确（从候选复制）
-10. 如果用户有历史旅行记录，尽量推荐不同的景点和路线
+2. 【参考攻略】若提供了「参考攻略」，只用于片区顺序、每日节奏、餐饮建议；不得新增候选外地点；禁止采用攻略中的票价/开放时间/酒店报价
+3. 按可游玩时段排满全天（约09:00-21:00），根据景点visit_duration累加安排；每天建议3-5个景点（大型景区可2-3个），避免日程空档
+4. 每天必须包含早中晚三餐，并安排合适的就餐时间
+5. 每天推荐一个具体的酒店(从酒店信息中选择或合理推荐)
+6. 考虑景点之间的距离和交通方式，规划合理的游览顺序；有参考攻略时优先按其中片区顺序排列已在候选中的景点
+7. 必须为每个景点规划具体的时间安排（开始时间+visit_duration）；优先复制候选中的建议游览时长与坐标
+8. 必须规划景点之间的交通方式和交通时间；若上文提供了高德真实路线数据，必须采用其距离与时长
+9. 返回完整的JSON格式数据，包含time_slots和route_segments字段
+10. 景点的经纬度坐标要真实准确（从候选复制）
+11. 如果用户有历史旅行记录，尽量推荐不同的景点和路线
 
 请严格按照提示词中的JSON格式返回完整的旅行计划，确保包含详细的时间安排和路线规划。"""
         

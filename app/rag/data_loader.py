@@ -45,10 +45,10 @@ class KnowledgeBaseLoader:
         return []
     
     def load_all_knowledge(self) -> List[Dict[str, Any]]:
-        """加载所有知识库数据"""
+        """加载景点/餐厅。攻略走 load_guide_data，不要混进 travel_knowledge。"""
         all_data = []
         
-        for category in ["attractions", "restaurants", "guides"]:
+        for category in ["attractions", "restaurants"]:
             category_path = os.path.join(self.base_path, category)
             if not os.path.exists(category_path):
                 continue

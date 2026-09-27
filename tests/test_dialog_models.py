@@ -3,17 +3,19 @@
 验证 PlanVersion、DialogSession、ChangeIntent、PlanDiff 等数据模型的正确性
 """
 
+import os
 import sys
 import json
 from datetime import datetime
 
-sys.path.insert(0, 'd:/Projects/LangChain')
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 # 直接导入模块，避免触发 app/__init__.py
 import importlib.machinery
 loader = importlib.machinery.SourceFileLoader(
     "dialog_models",
-    "d:/Projects/LangChain/app/agents/dialog_models.py"
+    os.path.join(ROOT, "app", "agents", "dialog_models.py"),
 )
 dialog_models = loader.load_module()
 
