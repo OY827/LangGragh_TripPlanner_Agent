@@ -9,7 +9,7 @@
 4. 版本管理：通过 VersionManager 保存每次修改的版本快照
 
 工作流程：
-    用户输入 → 意图识别 → 增量修改/全量重生成 → 差异计算 → 版本保存 → 回复用户
+    用户输入 → 意图识别 →（改景点/酒店时工具搜索）→ 增量修改/全量重生成 → 差异计算 → 版本保存 → 回复用户
 """
 
 import json
@@ -23,6 +23,12 @@ from app.agents.dialog_models import (
 )
 from app.agents.version_manager import VersionManager
 from app.llm import get_llm
+from app.services.structured_output import (
+    DialogPlanUpdate,
+    IntentOutput,
+    as_dict,
+    invoke_structured,
+)
 from app.prompts import get_prompt_manager
 from app.monitoring import traced
 from app.memory.sliding_window import SlidingWindowChatMemory
@@ -192,10 +198,11 @@ class DialogAgent:
                 "suggestions": suggestions.split("\n") if suggestions else []
             }
 
-        # 9. 执行修改
+        # 9. 执行修改。改景点或酒店时，先让模型按用户要求调用搜索工具。
         if intent.scope == ModifyScope.FULL.value:
             new_plan = self._regenerate_plan(current_plan, intent, resolved_input)
         else:
+            self._research_for_modification(current_plan, intent, resolved_input)
             new_plan = self._apply_incremental_change(current_plan, intent)
 
         if not new_plan:
@@ -269,20 +276,33 @@ class DialogAgent:
         )
         
         try:
-            response = self.llm.invoke(prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            
-            # 解析 LLM 返回的 JSON
-            intent_data = self._parse_json_from_response(content)
-            
+            parsed = invoke_structured(self.llm, IntentOutput, prompt)
+            intent_data = as_dict(parsed)
+            if isinstance(parsed, IntentOutput):
+                details = {
+                    key: value
+                    for key, value in parsed.details.model_dump().items()
+                    if value not in ("", None)
+                }
+                return ChangeIntent(
+                    change_type=parsed.change_type or ChangeType.NO_CHANGE.value,
+                    scope=parsed.scope or ModifyScope.INCREMENTAL.value,
+                    description=parsed.description,
+                    target_field=parsed.target_field,
+                    details=details,
+                    confidence=float(parsed.confidence),
+                )
             if intent_data:
+                details = intent_data.get("details") or {}
+                if not isinstance(details, dict):
+                    details = {}
                 return ChangeIntent(
                     change_type=intent_data.get("change_type", ChangeType.NO_CHANGE.value),
                     scope=intent_data.get("scope", ModifyScope.INCREMENTAL.value),
                     description=intent_data.get("description", ""),
                     target_field=intent_data.get("target_field", ""),
-                    details=intent_data.get("details", {}),
-                    confidence=float(intent_data.get("confidence", 0.8))
+                    details=details,
+                    confidence=float(intent_data.get("confidence", 0.8)),
                 )
         except Exception as e:
             print(f"意图识别失败，使用规则兜底: {e}")
@@ -936,6 +956,10 @@ class DialogAgent:
         """
         if not self.rag:
             return None
+
+        exact = self._lookup_attraction_exact(attraction_name, city)
+        if exact:
+            return exact
         
         try:
             docs, meta = self.rag.retrieve_with_validation(
@@ -954,41 +978,67 @@ class DialogAgent:
                 
                 # 检查是否匹配目标景点
                 if attraction_name in title or title in attraction_name:
-                    price_str = doc_meta.get("price", "0")
-                    try:
-                        price = int(re.sub(r'[^\d]', '', str(price_str)) or 0)
-                    except (ValueError, TypeError):
-                        price = 0
-                    
-                    return {
-                        "name": title,
-                        "ticket_price": price,
-                        "category": doc_meta.get("category", ""),
-                        "rating": doc_meta.get("rating", ""),
-                        "visit_duration": doc_meta.get("visit_duration", 60),
-                        "source": "知识库"
-                    }
+                    return self._attraction_from_metadata(doc_meta, title, "知识库")
             
             # 未精确匹配，返回第一个结果作为参考
             if docs:
                 doc = docs[0]
                 doc_meta = doc.get("metadata", {})
-                price_str = doc_meta.get("price", "0")
-                try:
-                    price = int(re.sub(r'[^\d]', '', str(price_str)) or 0)
-                except (ValueError, TypeError):
-                    price = 0
-                return {
-                    "name": doc_meta.get("title", attraction_name),
-                    "ticket_price": price,
-                    "category": doc_meta.get("category", ""),
-                    "rating": doc_meta.get("rating", ""),
-                    "source": "知识库(模糊匹配)"
-                }
+                return self._attraction_from_metadata(
+                    doc_meta,
+                    doc_meta.get("title", attraction_name),
+                    "知识库(模糊匹配)",
+                )
         except Exception as e:
             print(f"知识库检索失败: {e}")
         
         return None
+
+    def _lookup_attraction_exact(self, attraction_name: str, city: str) -> Optional[Dict[str, Any]]:
+        """按标题直接读知识库，避免整段混合检索失败时丢掉游览时长。"""
+        store = getattr(getattr(self.rag, "retriever", None), "vector_store", None)
+        finder = getattr(store, "find_by_title", None)
+        if finder is None:
+            return None
+        try:
+            hits = finder(attraction_name, city=city, limit=3)
+        except Exception as e:
+            print(f"知识库精确查找失败: {e}")
+            return None
+        if not hits:
+            return None
+        meta = (hits[0].get("metadata") or {})
+        return self._attraction_from_metadata(meta, attraction_name, "知识库")
+
+    def _attraction_from_metadata(
+        self,
+        doc_meta: Dict[str, Any],
+        fallback_name: str,
+        source: str,
+    ) -> Dict[str, Any]:
+        price_str = doc_meta.get("price", "0")
+        try:
+            price = int(re.sub(r"[^\d]", "", str(price_str)) or 0)
+        except (ValueError, TypeError):
+            price = 0
+        return {
+            "name": doc_meta.get("title") or fallback_name,
+            "ticket_price": price,
+            "category": doc_meta.get("category", ""),
+            "rating": doc_meta.get("rating", ""),
+            "visit_duration": self._visit_minutes(doc_meta.get("visit_duration"), default=60),
+            "address": doc_meta.get("address", ""),
+            "location": self._location_text(doc_meta),
+            "source": source,
+        }
+
+    @staticmethod
+    def _visit_minutes(value: Any, default: int = 120) -> int:
+        try:
+            minutes = int(float(value))
+        except (TypeError, ValueError):
+            return default
+        return minutes if minutes > 0 else default
     
     def _search_hotels_from_amap(self, city: str, budget_level: str = "medium") -> List[Dict[str, Any]]:
         """
@@ -1090,6 +1140,87 @@ class DialogAgent:
         
         return []
     
+    def _needs_live_search(self, change_type: str) -> bool:
+        return change_type in (
+            ChangeType.ADD_ITEM.value,
+            ChangeType.MODIFY_ATTRACTIONS.value,
+            ChangeType.MODIFY_HOTEL.value,
+        )
+
+    def _get_search_agent(self):
+        """对话修改专用：只绑定景点搜索和酒店搜索。"""
+        if getattr(self, "_search_agent", None) is None:
+            from app.agents.react_agent import ReActAgent
+            from app.services.structured_output import SearchResultOutput
+            from app.tools.agent_tools import SmartAttractionTool, RollingGoHotelTool
+
+            self._search_agent = ReActAgent(
+                name="对话检索",
+                tools=[SmartAttractionTool(), RollingGoHotelTool()],
+                llm=self.llm,
+                system_prompt=(
+                    "你负责按用户的修改要求重新搜索景点和酒店，不重写整份行程。\n"
+                    "改景点时调用 smart_attraction_search，参数用计划里的城市和用户要求里的关键词。\n"
+                    "改酒店时调用 hotel_search，带上城市、住宿关键词、入住日期和住宿晚数。\n"
+                    "工具返回后根据结果填写景点名、酒店名和价格，不要编造工具里没有的名称。"
+                ),
+                max_iterations=3,
+                verbose=False,
+                response_format=SearchResultOutput,
+            )
+        return self._search_agent
+
+    def _research_for_modification(
+        self,
+        plan: Dict[str, Any],
+        intent: ChangeIntent,
+        user_input: str,
+    ) -> None:
+        """让模型调用景点/酒店工具，把重新搜索的结果记到意图上。"""
+        if not self._needs_live_search(intent.change_type):
+            return
+        city = plan.get("city", "")
+        if not city:
+            return
+        days = int(plan.get("duration_days") or 1)
+        stay_nights = max(1, days - 1)
+        start_date = ""
+        daily = plan.get("daily_itinerary")
+        if isinstance(daily, dict):
+            start_date = str(daily.get("start_date") or "")
+        query = (
+            f"城市：{city}\n"
+            f"当前景点：{', '.join(plan.get('attractions') or []) or '无'}\n"
+            f"当前住宿：{plan.get('accommodation') or '未指定'}\n"
+            f"入住日期：{start_date or '未指定'}\n"
+            f"住宿晚数：{stay_nights}\n"
+            f"修改类型：{intent.change_type}\n"
+            f"用户要求：{user_input}"
+        )
+        try:
+            text = self._get_search_agent().run(query)
+        except Exception as e:
+            print(f"对话检索失败: {e}")
+            return
+        parsed = self._parse_json_from_response(text) if text else None
+        if not isinstance(parsed, dict):
+            return
+        attractions = parsed.get("attractions") or []
+        if isinstance(attractions, str):
+            attractions = [attractions]
+        price = parsed.get("hotel_price")
+        try:
+            price = float(price) if price not in (None, "") else None
+        except (TypeError, ValueError):
+            price = None
+        intent.details = dict(intent.details or {})
+        intent.details["search_result"] = {
+            "attractions": [str(name).strip() for name in attractions if str(name).strip()],
+            "hotel": str(parsed.get("hotel") or "").strip(),
+            "hotel_price": price,
+            "summary": str(parsed.get("summary") or "").strip(),
+        }
+
     # ========== 增量修改 ==========
     
     def _apply_incremental_change(
@@ -1148,6 +1279,14 @@ class DialogAgent:
             item = self._extract_attraction_name(intent.description)
 
         if not self._is_valid_attraction_name(item):
+            searched = (intent.details or {}).get("search_result") or {}
+            for name in searched.get("attractions") or []:
+                if name and name not in plan.get("attractions", []):
+                    item = name
+                    intent.details["item"] = item
+                    intent.details["from_tool_search"] = True
+                    break
+        if not self._is_valid_attraction_name(item):
             # 无效名称：尝试知识库推荐一个
             city = plan.get("city", "")
             recs = self._recommend_attractions_from_kb(city, exclude=plan.get("attractions", []))
@@ -1191,6 +1330,7 @@ class DialogAgent:
                     "category": kb_info.get("category", "景点") if kb_info else "景点",
                     "description": f"新增推荐：{item}",
                     "address": kb_info.get("address", "") if kb_info else "",
+                    "location": kb_info.get("location", "") if kb_info else "",
                     "visit_duration": kb_info.get("visit_duration", 120) if kb_info else 120,
                 }],
             )
@@ -1307,6 +1447,15 @@ class DialogAgent:
         ):
             add_name = ""
 
+        # 用户没有点名时，用工具重新搜到的景点
+        if not add_name:
+            searched = (intent.details or {}).get("search_result") or {}
+            for name in searched.get("attractions") or []:
+                if name and name != remove_name and name not in current:
+                    add_name = name
+                    intent.details["from_tool_search"] = True
+                    break
+
         # 用户只说“替换成其他”时，从知识库推荐
         if not add_name:
             exclude = list(current)
@@ -1376,6 +1525,7 @@ class DialogAgent:
                 "category": (kb_new or {}).get("category", "景点"),
                 "description": f"替换「{remove_name}」为「{add_name}」",
                 "address": (kb_new or {}).get("address", ""),
+                "location": (kb_new or {}).get("location", ""),
                 "visit_duration": (kb_new or {}).get("visit_duration", 120),
             }] if add_name else [],
             prefer_day_of=remove_name,
@@ -1418,6 +1568,7 @@ class DialogAgent:
         if not isinstance(days, list) or not days:
             return plan
 
+        changed_days = set()
         target_day_idx = None
         for i, day in enumerate(days):
             attrs = day.get("attractions", [])
@@ -1430,6 +1581,8 @@ class DialogAgent:
                     target_day_idx = i
                 if name not in removed:
                     kept.append(a)
+                else:
+                    changed_days.add(i)
             day["attractions"] = kept
 
         if target_day_idx is None:
@@ -1442,7 +1595,7 @@ class DialogAgent:
                 attr_obj = {
                     "name": item,
                     "address": "",
-                    "location": {"longitude": 116.4, "latitude": 39.9},
+                    "location": "",
                     "visit_duration": 120,
                     "description": f"推荐景点：{item}",
                     "category": "景点",
@@ -1452,7 +1605,7 @@ class DialogAgent:
                 attr_obj = {
                     "name": item.get("name", ""),
                     "address": item.get("address", ""),
-                    "location": item.get("location") or {"longitude": 116.4, "latitude": 39.9},
+                    "location": self._location_text(item),
                     "visit_duration": item.get("visit_duration", 120),
                     "description": item.get("description", ""),
                     "category": item.get("category", "景点"),
@@ -1464,6 +1617,21 @@ class DialogAgent:
             if not attr_obj["name"]:
                 continue
             days[target_day_idx].setdefault("attractions", []).append(attr_obj)
+            changed_days.add(target_day_idx)
+
+        city = plan.get("city", "")
+        transportation = plan.get("transportation") or "公共交通"
+        hotel = self._hotel_anchor_from_plan(plan)
+        used_names = set()
+        for day in days:
+            for item in day.get("attractions") or []:
+                name = item.get("name", "") if isinstance(item, dict) else str(item)
+                if name:
+                    used_names.add(name)
+        for index in sorted(changed_days):
+            if hotel:
+                days[index]["hotel"] = hotel
+            self._replan_day_schedule(days[index], city, transportation, used_names)
 
         # 以日程为准重建 flat 列表，避免两边不一致
         flat = []
@@ -1476,6 +1644,106 @@ class DialogAgent:
         daily["days"] = days
         plan["daily_itinerary"] = daily
         return plan
+
+    @staticmethod
+    def _location_text(data: Dict[str, Any]) -> str:
+        """把坐标收成高德要的「经度,纬度」。没有坐标就返回空串，改用地址或城市+店名。"""
+        if not isinstance(data, dict):
+            return ""
+        location = data.get("location")
+        if isinstance(location, str) and "," in location:
+            return location.strip()
+        if isinstance(location, dict):
+            lon = location.get("longitude")
+            lat = location.get("latitude")
+        else:
+            lon = data.get("longitude")
+            lat = data.get("latitude")
+        if lon in (None, "") or lat in (None, ""):
+            return ""
+        return f"{lon},{lat}"
+
+    def _schedule_helper(self):
+        """只借用规划节点的路程和时间表算法，不初始化整份规划图。"""
+        helper = getattr(self, "_schedule_nodes", None)
+        if helper is not None:
+            return helper
+        from app.agents.langgraph_nodes import GraphNodes
+        from app.services.amap_service import get_amap_service
+
+        helper = GraphNodes.__new__(GraphNodes)
+        helper.amap_service = self.amap or get_amap_service()
+        helper.logger = None
+        helper.llm = getattr(self, "llm", None)
+        helper.retriever = getattr(getattr(self, "rag", None), "retriever", None)
+        helper._fill_agent = None
+        self._schedule_nodes = helper
+        return helper
+
+    def _replan_day_schedule(
+        self,
+        day: Dict[str, Any],
+        city: str,
+        transportation: str,
+        used: set = None,
+    ) -> None:
+        """按第一轮同一套规则重算当天路程、用餐和时间，空档补到 21:00。"""
+        if not isinstance(day, dict):
+            return
+        helper = self._schedule_helper()
+        fill = getattr(helper, "_fill_day_until_close", None)
+        if fill is None:
+            return
+        fill(day, city, transportation or "公共交通", used if used is not None else set())
+
+    @staticmethod
+    def _hotel_anchor_from_plan(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        hotel = plan.get("hotel")
+        if isinstance(hotel, dict) and str(hotel.get("name") or "").strip():
+            return hotel
+        accommodation = plan.get("accommodation")
+        if isinstance(accommodation, str) and accommodation.strip():
+            return {"name": accommodation.strip()}
+        return None
+
+    def _replan_days_for_hotel(self, plan: Dict[str, Any]) -> None:
+        """换了具体酒店后，各天从酒店出发、结束时返回酒店。"""
+        hotel = self._hotel_anchor_from_plan(plan)
+        if not hotel:
+            return
+        daily = plan.get("daily_itinerary")
+        if not isinstance(daily, dict):
+            return
+        days = daily.get("days")
+        if not isinstance(days, list):
+            return
+        city = plan.get("city") or ""
+        transportation = plan.get("transportation") or "公共交通"
+        used_names = set()
+        for day in days:
+            if not isinstance(day, dict):
+                continue
+            for item in day.get("attractions") or []:
+                name = item.get("name", "") if isinstance(item, dict) else str(item)
+                if name:
+                    used_names.add(name)
+        for day in days:
+            if not isinstance(day, dict):
+                continue
+            day["hotel"] = hotel
+            self._replan_day_schedule(day, city, transportation, used_names)
+        flat = []
+        for day in days:
+            if not isinstance(day, dict):
+                continue
+            for item in day.get("attractions") or []:
+                name = item.get("name", "") if isinstance(item, dict) else str(item)
+                if name and name not in flat:
+                    flat.append(name)
+        if flat:
+            plan["attractions"] = flat
+        daily["days"] = days
+        plan["daily_itinerary"] = daily
     
     def _handle_modify_duration(self, plan: Dict[str, Any], intent: ChangeIntent) -> Dict[str, Any]:
         """处理天数修改"""
@@ -1510,7 +1778,34 @@ class DialogAgent:
         """处理酒店修改（集成高德搜索获取真实酒店信息）"""
         action = intent.details.get("action", "reduce")
         description = intent.description or ""
-        city = plan.get("city", "")
+        searched = (intent.details or {}).get("search_result") or {}
+        hotel_name = (searched.get("hotel") or "").strip()
+        hotel_price = searched.get("hotel_price")
+        budget = plan.get("budget", {})
+        days = int(plan.get("duration_days") or 1)
+        nights = max(1, days - 1)
+
+        if hotel_name:
+            plan["accommodation"] = hotel_name
+            plan["hotel"] = {
+                "name": hotel_name,
+                "price_per_night": hotel_price,
+                "source": "hotel_search",
+            }
+            intent.details["hotel_from_tool"] = hotel_name
+
+        if isinstance(budget, dict) and isinstance(hotel_price, (int, float)) and hotel_price > 0:
+            budget["total_hotels"] = int(hotel_price) * nights
+            budget["total"] = (
+                budget.get("total_attractions", 0)
+                + budget.get("total_hotels", 0)
+                + budget.get("total_meals", 0)
+                + budget.get("total_transportation", 0)
+            )
+            plan["budget"] = budget
+            if hotel_name:
+                self._replan_days_for_hotel(plan)
+            return plan
 
         # 降价/提价关键词
         reduce_kws = ["便宜", "降低", "省钱", "太贵", "少点", "经济", "实惠", "低档", "经济型", "快捷", "降", "减", "低", "省"]
@@ -1560,6 +1855,8 @@ class DialogAgent:
             )
             plan["budget"] = budget
 
+        if hotel_name:
+            self._replan_days_for_hotel(plan)
         return plan
     
     # ========== 全量重生成 ==========
@@ -1619,12 +1916,12 @@ class DialogAgent:
 请返回修改后的完整JSON计划（只返回JSON，不要其他内容）："""
         
         try:
-            response = self.llm.invoke(prompt)
-            content = response.content if hasattr(response, 'content') else str(response)
-            new_plan = self._parse_json_from_response(content)
-            
+            parsed = invoke_structured(self.llm, DialogPlanUpdate, prompt)
+            if isinstance(parsed, DialogPlanUpdate):
+                new_plan = parsed.model_dump(exclude_defaults=True)
+            else:
+                new_plan = as_dict(parsed)
             if new_plan:
-                # 合并：确保保留原计划中未被修改的字段
                 merged = current_plan.copy()
                 merged.update(new_plan)
                 return merged
@@ -1685,6 +1982,12 @@ class DialogAgent:
                 "delta": new_days - old_days
             }
             diff.change_descriptions.append(f"行程天数: {old_days}天 → {new_days}天")
+
+        old_stay = old_plan.get("accommodation") or ""
+        new_stay = new_plan.get("accommodation") or ""
+        if old_stay != new_stay and new_stay:
+            diff.hotel_change = {"old": old_stay, "new": new_stay}
+            diff.change_descriptions.append(f"住宿: {old_stay or '未指定'} → {new_stay}")
         
         # 生成摘要
         if diff.has_changes():

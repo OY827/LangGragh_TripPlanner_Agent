@@ -3,8 +3,8 @@ LangGraph Agent 测试脚本
 
 测试内容：
 1. 导入验证
-2. 景点子图独立测试
-3. 天气/酒店子图测试
+2. 景点检索节点测试
+3. 天气/酒店节点测试
 4. 主图端到端测试
 5. Checkpointer 会话持久化测试
 """
@@ -65,36 +65,37 @@ def test_imports():
     return True
 
 
-def test_attraction_subgraph():
-    """测试景点子图"""
+def test_attraction_nodes():
+    """测试知识库检索、高德搜索和合并"""
     print("\n" + "="*60)
-    print("测试2: 景点子图（独立运行）")
+    print("测试2: 景点检索节点")
     print("="*60)
     
     try:
         from app.agents.langgraph_builder import LangGraphBuilder
         
         builder = LangGraphBuilder()
-        app = builder.get_attraction_graph()
         
-        print("  正在运行景点子图...")
+        print("  正在检索景点...")
         start_time = time.time()
-        
-        result = app.invoke({
+        state = {
             "query": "历史文化古迹",
             "city": "上海",
             "preferences": ["历史文化"],
             "visited_attractions": [],
             "iteration_count": 0,
-        })
+        }
+        kb = builder.nodes.retrieve_knowledge(state)
+        amap = builder.nodes.search_amap(state)
+        result = builder.nodes.merge_attraction_results({**state, **kb, **amap})
+        result = {**kb, **amap, **result}
         
         elapsed = time.time() - start_time
         
-        print(f"  ✅ 子图运行完成（耗时: {elapsed:.1f}s）")
+        print(f"  ✅ 检索完成（耗时: {elapsed:.1f}s）")
         print(f"     知识库文档数: {len(result.get('kb_docs', []))}")
         print(f"     高德结果长度: {len(result.get('amap_results', ''))}")
         print(f"     合并结果长度: {len(result.get('merged_results', ''))}")
-        print(f"     反思结果: {result.get('reflection_feedback', '')}")
         print(f"     最终响应长度: {len(result.get('attraction_response', ''))}")
         
         if result.get('kb_docs'):
@@ -107,26 +108,25 @@ def test_attraction_subgraph():
         
         return True
     except Exception as e:
-        print(f"  ❌ 景点子图测试失败: {e}")
+        print(f"  ❌ 景点检索测试失败: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def test_weather_subgraph():
-    """测试天气子图"""
+def test_weather_node():
+    """测试天气节点"""
     print("\n" + "="*60)
-    print("测试3: 天气子图")
+    print("测试3: 天气节点")
     print("="*60)
     
     try:
         from app.agents.langgraph_builder import LangGraphBuilder
         
         builder = LangGraphBuilder()
-        app = builder.get_weather_graph()
         
         print("  正在查询天气...")
-        result = app.invoke({
+        result = builder.nodes.fetch_weather({
             "city": "上海",
             "start_date": "2026-07-29",
             "end_date": "2026-07-30",
@@ -136,26 +136,25 @@ def test_weather_subgraph():
         print(f"     天气响应: {result.get('weather_response', 'N/A')[:100]}...")
         return True
     except Exception as e:
-        print(f"  ❌ 天气子图测试失败: {e}")
+        print(f"  ❌ 天气节点测试失败: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def test_hotel_subgraph():
-    """测试酒店子图"""
+def test_hotel_node():
+    """测试酒店节点"""
     print("\n" + "="*60)
-    print("测试4: 酒店子图")
+    print("测试4: 酒店节点")
     print("="*60)
     
     try:
         from app.agents.langgraph_builder import LangGraphBuilder
         
         builder = LangGraphBuilder()
-        app = builder.get_hotel_graph()
         
         print("  正在搜索酒店...")
-        result = app.invoke({
+        result = builder.nodes.search_hotels({
             "city": "上海",
             "accommodation": "经济型",
             "iteration_count": 0,
@@ -165,7 +164,7 @@ def test_hotel_subgraph():
         print(f"     酒店响应: {result.get('hotel_response', 'N/A')[:100]}...")
         return True
     except Exception as e:
-        print(f"  ❌ 酒店子图测试失败: {e}")
+        print(f"  ❌ 酒店节点测试失败: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -361,9 +360,9 @@ def main():
     
     tests = [
         ("模块导入", test_imports),
-        ("景点子图", test_attraction_subgraph),
-        ("天气子图", test_weather_subgraph),
-        ("酒店子图", test_hotel_subgraph),
+        ("景点检索", test_attraction_nodes),
+        ("天气节点", test_weather_node),
+        ("酒店节点", test_hotel_node),
         ("完整旅行规划", test_full_trip_planner),
         ("Checkpointer 持久化", test_checkpointer_session),
         ("Human-in-the-loop", test_hitl),

@@ -1,0 +1,93 @@
+[
+  {
+    "id": "shanghai_2d_ok",
+    "city": "上海",
+    "travel_days": 2,
+    "candidate_attractions": ["外滩", "南京路步行街", "豫园"],
+    "candidate_hotels": ["99优选酒店"],
+    "plan": {
+      "hotel": {"name": "99优选酒店", "location": "121.48,31.23"},
+      "days": [
+        {
+          "attractions": [
+            {"name": "外滩", "visit_duration": 90, "start_time": "09:00", "end_time": "10:30", "location": "121.49,31.24"},
+            {"name": "南京路步行街", "visit_duration": 60, "start_time": "10:45", "end_time": "11:45", "location": "121.47,31.23"}
+          ]
+        },
+        {
+          "attractions": [
+            {"name": "豫园", "visit_duration": 120, "start_time": "09:00", "end_time": "11:00", "location": "121.49,31.23"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "outside_candidate",
+    "city": "上海",
+    "travel_days": 1,
+    "candidate_attractions": ["外滩"],
+    "candidate_hotels": ["99优选酒店"],
+    "plan": {
+      "hotel": {"name": "99优选酒店", "location": "121.48,31.23"},
+      "days": [
+        {
+          "attractions": [
+            {"name": "虚构乐园", "visit_duration": 60, "start_time": "09:00", "end_time": "10:00", "location": "121.50,31.20"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "clipped_visit",
+    "city": "上海",
+    "travel_days": 1,
+    "candidate_attractions": ["外滩"],
+    "candidate_hotels": ["99优选酒店"],
+    "plan": {
+      "hotel": {"name": "99优选酒店", "location": "121.48,31.23"},
+      "days": [
+        {
+          "attractions": [
+            {"name": "外滩", "visit_duration": 90, "start_time": "09:00", "end_time": "09:30", "location": "121.49,31.24"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "beijing_default_coord",
+    "city": "上海",
+    "travel_days": 1,
+    "candidate_attractions": ["外滩"],
+    "candidate_hotels": ["99优选酒店"],
+    "plan": {
+      "hotel": {"name": "99优选酒店", "location": {"longitude": 116.4, "latitude": 39.9}},
+      "days": [
+        {
+          "attractions": [
+            {"name": "外滩", "visit_duration": 90, "start_time": "09:00", "end_time": "10:30", "location": "121.49,31.24"}
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "day_count_short",
+    "city": "上海",
+    "travel_days": 2,
+    "candidate_attractions": ["外滩"],
+    "candidate_hotels": ["99优选酒店"],
+    "plan": {
+      "hotel": {"name": "99优选酒店", "location": "121.48,31.23"},
+      "days": [
+        {
+          "attractions": [
+            {"name": "外滩", "visit_duration": 90, "start_time": "09:00", "end_time": "10:30", "location": "121.49,31.24"}
+          ]
+        }
+      ]
+    }
+  }
+]

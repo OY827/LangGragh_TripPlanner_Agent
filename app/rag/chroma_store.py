@@ -138,6 +138,27 @@ class ChromaVectorStore:
         self._bm25_corpus: Dict[str, List] = {}
         print(f"✅ 使用本地 Chroma: {self.persist_directory} / {self.default_collection}")
 
+    def find_by_title(self, title: str, city: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+        """按景点名精确读取，不走向量检索。对话替换时用来拿到游览时长和坐标。"""
+        title = (title or "").strip()
+        if not title or not self.collection_exists():
+            return []
+        try:
+            raw = self.client.get_collection(self.default_collection).get(
+                where={"title": title},
+                include=["documents", "metadatas"],
+                limit=limit,
+            )
+        except Exception:
+            return []
+        docs = []
+        for text, metadata in zip(raw.get("documents") or [], raw.get("metadatas") or []):
+            content, restored = _restore_document(text or "", metadata)
+            if city and restored.get("city") and restored.get("city") != city:
+                continue
+            docs.append({"content": content, "metadata": restored})
+        return docs
+
     def collection_exists(self, collection_name: str = None) -> bool:
         collection = collection_name or self.default_collection
         names = {item.name for item in self.client.list_collections()}

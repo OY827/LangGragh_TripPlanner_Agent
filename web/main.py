@@ -304,15 +304,17 @@ async def generate_trip_plan(request: TripRequest, background_tasks: BackgroundT
             preferences=request.preferences or [],
             user_id=request.user_id or "",
             free_text_input=request.free_text_input or "",
-            thread_id=request.user_id or None,
         )
         plan = graph_result_to_trip_plan(result, request)
 
         if plan:
             return TripPlanResponse(
                 success=True,
-                message="旅行计划生成成功",
+                message="旅行计划已生成，图已暂停，可以继续修改",
                 data=plan,
+                thread_id=result.get("thread_id") or None,
+                session_id=result.get("session_id") or None,
+                welcome_message=result.get("dialog_reply") or None,
             )
         return TripPlanResponse(
             success=False,
@@ -579,34 +581,32 @@ async def create_dialog_session(request: DialogSessionRequest):
 
 @app.post("/api/dialog/chat", response_model=DialogChatResponse, tags=["对话修改"])
 async def dialog_chat(request: DialogChatRequest):
-    """处理用户的计划修改对话"""
+    """把修改指令送回暂停中的主图。"""
     try:
-        agent = get_dialog_agent()
-        vm = get_version_manager()
-        if not agent or not vm:
-            raise HTTPException(status_code=500, detail="对话修改服务初始化失败")
+        planner = get_trip_planner()
+        if not planner:
+            raise HTTPException(status_code=500, detail="旅行规划服务初始化失败")
 
-        session = vm.get_session(request.session_id)
-        if not session:
-            raise HTTPException(status_code=404, detail="会话不存在，请重新生成计划")
+        result = await planner.aresume_dialog(request.thread_id, request.message.strip())
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
 
-        result = agent.process_modification(
-            session_id=request.session_id,
-            user_input=request.message.strip(),
+        parsed = result.get("trip_plan_parsed") if isinstance(result.get("trip_plan_parsed"), dict) else {}
+        stub = TripRequest(
+            city=result.get("city") or parsed.get("city") or "未指定",
+            start_date=parsed.get("start_date") or "1970-01-01",
+            end_date=parsed.get("end_date") or parsed.get("start_date") or "1970-01-01",
+            travel_days=int(result.get("travel_days") or 1),
         )
-
-        current_version = vm.get_current_version(request.session_id)
-        trip_plan = normalize_trip_plan_day_indices(
-            extract_trip_plan(current_version.plan_data) if current_version else None
-        )
+        trip_plan = graph_result_to_trip_plan(result, stub)
 
         return DialogChatResponse(
             success=True,
-            message="对话处理成功",
-            reply=result.get("reply", ""),
+            message="对话处理成功" if result.get("awaiting_input") else "对话已结束",
+            reply=result.get("dialog_reply") or "",
             trip_plan=trip_plan,
-            changes=result.get("changes", []),
-            new_version_id=result.get("new_version_id"),
+            changes=result.get("dialog_changes") or [],
+            new_version_id=result.get("current_version_id") or None,
         )
     except HTTPException:
         raise

@@ -4,9 +4,9 @@ LangGraph 全局状态 Schema 定义
 定义所有 Agent 共享的全局状态字段，用于在图节点间传递数据。
 状态分为：
 - TripState: 主旅行规划图的状态
-- AttractionState: 景点子图的状态
-- WeatherState: 天气子图的状态
-- HotelState: 酒店子图的状态
+- AttractionState: 景点检索相关字段
+- WeatherState: 天气节点的状态
+- HotelState: 酒店节点的状态
 """
 
 from typing import TypedDict, List, Dict, Any, Optional, Literal
@@ -14,7 +14,7 @@ from operator import add
 
 
 class AttractionState(TypedDict, total=False):
-    """景点子图状态"""
+    """景点检索字段"""
     query: str
     city: str
     preferences: List[str]
@@ -35,7 +35,7 @@ class AttractionState(TypedDict, total=False):
 
 
 class WeatherState(TypedDict, total=False):
-    """天气子图状态"""
+    """天气节点状态"""
     city: str
     start_date: str
     end_date: str
@@ -45,7 +45,7 @@ class WeatherState(TypedDict, total=False):
 
 
 class HotelState(TypedDict, total=False):
-    """酒店子图状态"""
+    """酒店节点状态"""
     city: str
     accommodation: str
     start_date: str
@@ -72,7 +72,7 @@ class TripState(TypedDict, total=False):
     user_id: str
     free_text_input: str
 
-    # 景点子图字段（与 AttractionState 共享）
+    # 景点检索字段（与 AttractionState 共享）
     query: str
     kb_docs: List[Dict[str, Any]]
     amap_results: str
@@ -84,10 +84,10 @@ class TripState(TypedDict, total=False):
     weather_response: str
     hotel_response: str
 
-    # 天气子图字段（与 WeatherState 共享）
+    # 天气节点字段（与 WeatherState 共享）
     # start_date, end_date, weather_response, city 已定义
 
-    # 酒店子图字段（与 HotelState 共享）
+    # 酒店节点字段（与 HotelState 共享）
     # city, accommodation, hotel_response 已定义
 
     # 路线

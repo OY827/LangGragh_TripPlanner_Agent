@@ -402,10 +402,13 @@ class RouteRequest(BaseModel):
 # ============ 响应相关模型 ============
 
 class TripPlanResponse(BaseModel):
-    """旅行计划响应"""
+    """旅行计划响应。规划在对话节点暂停，thread_id 用来恢复修改。"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
+    thread_id: Optional[str] = Field(default=None, description="主图会话，恢复对话时传回")
+    session_id: Optional[str] = Field(default=None, description="版本管理会话ID")
+    welcome_message: Optional[str] = Field(default=None, description="暂停时展示的引导语")
 
 
 class DialogSessionRequest(BaseModel):
@@ -426,8 +429,8 @@ class DialogSessionResponse(BaseModel):
 
 
 class DialogChatRequest(BaseModel):
-    """对话修改请求"""
-    session_id: str = Field(..., description="对话会话ID")
+    """恢复暂停中的主图，送入一条修改指令。"""
+    thread_id: str = Field(..., description="规划接口返回的主图会话")
     message: str = Field(..., description="用户修改指令")
 
 

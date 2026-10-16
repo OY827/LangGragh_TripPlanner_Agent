@@ -7,13 +7,42 @@ Hybrid RAG 模块
 3. 答案验证 (Answer Validation)：检查答案与源对齐、完整性、准确性
 """
 
-import json
 import time
 from typing import Dict, Any, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 
 from app.llm import get_llm
 from app.rag.retriever import KnowledgeRetriever
+from app.services.structured_output import AnswerCheck, QueryVariants, as_dict, invoke_structured
+
+
+def _price_amount(value: Any) -> Optional[float]:
+    """把 0、30、'30元'、'免费' 收成数字。无法识别时返回 None。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if "免费" in text or text in {"免票", "免费"}:
+        return 0.0
+    number = []
+    seen_dot = False
+    for ch in text:
+        if ch.isdigit():
+            number.append(ch)
+        elif ch == "." and not seen_dot:
+            number.append(ch)
+            seen_dot = True
+        elif number:
+            break
+    if not number or number == ["."]:
+        return None
+    try:
+        return float("".join(number))
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -323,28 +352,18 @@ class HybridRAG:
 
 返回 JSON 格式: {{"queries": ["变体1", "变体2", "变体3"]}}"""
 
-            response = self.llm.invoke(prompt)
-            text = response.content if hasattr(response, 'content') else str(response)
-
-            # 清理markdown代码块标记（LLM常返回 ```json ... ``` 格式）
-            text = text.strip()
-            if text.startswith("```json"):
-                text = text[7:]
-            elif text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-            try:
-                parsed = json.loads(text)
-                variants = parsed.get("queries", [])
-                if variants and isinstance(variants, list):
-                    # 保留原始查询作为第一个变体，确保不丢失原始语义
-                    result = [query] + [v for v in variants if v != query]
-                    return result[:self.config.max_query_variants]
-            except (json.JSONDecodeError, AttributeError):
-                pass
+            parsed = invoke_structured(self.llm, QueryVariants, prompt)
+            variants = []
+            if isinstance(parsed, QueryVariants):
+                variants = parsed.queries
+            else:
+                data = as_dict(parsed) or {}
+                raw_queries = data.get("queries") or []
+                if isinstance(raw_queries, list):
+                    variants = [str(item) for item in raw_queries if str(item).strip()]
+            if variants:
+                result = [query] + [item for item in variants if item != query]
+                return result[:self.config.max_query_variants]
 
             variants = self._rule_based_expand(query, city, preferences)
             return variants
@@ -525,10 +544,12 @@ class HybridRAG:
                 boost += 0.3
 
             # 价格过滤：免费查询时，免费景点 +100%，付费景点 -50%
+            # 库里的价格经常是 "30元" 这种字符串，不能直接和数字比较
             if price_filter == 0:
-                if doc_price == 0 or doc_price == "免费":
+                price_amount = _price_amount(doc_price)
+                if price_amount == 0:
                     boost += 1.0
-                elif doc_price is not None and doc_price > 0:
+                elif price_amount is not None and price_amount > 0:
                     boost *= 0.5
 
             # 收藏数/评分Boost（使用热门度排序）
@@ -600,14 +621,14 @@ class HybridRAG:
 请生成3个全新的、更具体的查询变体来改善检索结果。
 返回 JSON: {{"queries": ["查询1", "查询2", "查询3"]}}"""
 
-            response = self.llm.invoke(prompt)
-            text = response.content if hasattr(response, 'content') else str(response)
-
-            try:
-                parsed = json.loads(text)
-                return parsed.get("queries", [])[:self.config.max_query_variants]
-            except (json.JSONDecodeError, AttributeError):
-                return self._rule_based_expand(original_query, "", [])
+            parsed = invoke_structured(self.llm, QueryVariants, prompt)
+            if isinstance(parsed, QueryVariants):
+                return parsed.queries[:self.config.max_query_variants]
+            data = as_dict(parsed) or {}
+            queries = data.get("queries") or []
+            if isinstance(queries, list) and queries:
+                return [str(item) for item in queries if str(item).strip()][:self.config.max_query_variants]
+            return self._rule_based_expand(original_query, "", [])
         except Exception:
             return self._rule_based_expand(original_query, "", [])
 
@@ -731,26 +752,21 @@ class HybridRAG:
 请直接返回纯 JSON:
 {{"grounded": true, "completeness": 0.8, "alignment_score": 0.7, "issues": []}}"""
 
-            response = self.llm.invoke(prompt)
-            text = response.content if hasattr(response, 'content') else str(response)
-
-            parsed = self._extract_json(text)
-            if parsed:
-                result["grounded"] = parsed.get("grounded", True)
-                result["completeness"] = float(parsed.get("completeness", 0.5))
-                result["alignment_score"] = float(parsed.get("alignment_score", 0.5))
-                result["issues"] = parsed.get("issues", [])
+            parsed = invoke_structured(self.llm, AnswerCheck, prompt)
+            if isinstance(parsed, AnswerCheck):
+                result["grounded"] = parsed.grounded
+                result["completeness"] = parsed.completeness
+                result["alignment_score"] = parsed.alignment_score
+                result["issues"] = parsed.issues
             else:
-                if text.strip().startswith("{"):
-                    try:
-                        parsed = json.loads(text)
-                        result["grounded"] = parsed.get("grounded", True)
-                        result["completeness"] = float(parsed.get("completeness", 0.5))
-                        result["alignment_score"] = float(parsed.get("alignment_score", 0.5))
-                        result["issues"] = parsed.get("issues", [])
-                    except Exception:
-                        pass
-                if result["completeness"] == 0.0:
+                data = as_dict(parsed)
+                if data:
+                    result["grounded"] = bool(data.get("grounded", True))
+                    result["completeness"] = float(data.get("completeness", 0.5) or 0.5)
+                    result["alignment_score"] = float(data.get("alignment_score", 0.5) or 0.5)
+                    issues = data.get("issues") or []
+                    result["issues"] = issues if isinstance(issues, list) else [str(issues)]
+                else:
                     result["grounded"] = True
                     result["completeness"] = 0.7
                     result["alignment_score"] = 0.7
@@ -763,56 +779,3 @@ class HybridRAG:
             result["completeness"] = 0.7
             result["alignment_score"] = 0.7
             return True, result
-
-    def _extract_json(self, text: str) -> Optional[Dict]:
-        """从 LLM 响应中提取 JSON（处理 markdown 包裹、额外文字等）"""
-        if not text:
-            return None
-
-        text = text.strip()
-
-        # 尝试直接解析
-        try:
-            return json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # 尝试提取 ```json ... ``` 代码块
-        for start_marker in ["```json", "```"]:
-            start = text.find(start_marker)
-            if start != -1:
-                json_start = text.find("{", start)
-                json_end = text.rfind("}")
-                if json_start != -1 and json_end != -1 and json_end > json_start:
-                    try:
-                        return json.loads(text[json_start:json_end + 1])
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-
-        # 尝试提取首个 { 到最后一个 }
-        first_brace = text.find("{")
-        last_brace = text.rfind("}")
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            try:
-                return json.loads(text[first_brace:last_brace + 1])
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # 手动解析关键字段
-        result = {}
-        import re
-        grounded_match = re.search(r'"grounded"\s*:\s*(true|false)', text, re.IGNORECASE)
-        if grounded_match:
-            result["grounded"] = grounded_match.group(1).lower() == "true"
-        
-        completeness_match = re.search(r'"completeness"\s*:\s*([0-9.]+)', text)
-        if completeness_match:
-            result["completeness"] = float(completeness_match.group(1))
-        
-        alignment_match = re.search(r'"alignment_score"\s*:\s*([0-9.]+)', text)
-        if alignment_match:
-            result["alignment_score"] = float(alignment_match.group(1))
-
-        if result:
-            return result
-        return None

@@ -1,5 +1,5 @@
 """
-验证景点/天气/酒店子图异步并发
+验证知识库、高德、天气、酒店四路异步并发
 
 对比：
 1. 串行 await 三个子图
@@ -21,7 +21,7 @@ load_dotenv()
 
 async def main():
     print("=" * 70)
-    print("异步并发子图验证")
+    print("四路异步并发验证")
     print("=" * 70)
 
     from app.agents.langgraph_builder import LangGraphBuilder
@@ -39,25 +39,28 @@ async def main():
     }
 
     # 1) 串行
-    print("\n[1] 串行执行三个子图...")
+    print("\n[1] 串行执行四路...")
     t0 = time.time()
-    r1 = await builder._run_attraction_subgraph(state)
+    r1 = await builder._run_retrieve(state)
     t_attr = time.time()
-    r2 = await builder._run_weather_subgraph(state)
+    r_amap = await builder._run_amap(state)
+    t_amap = time.time()
+    r2 = await builder._run_weather(state)
     t_weather = time.time()
-    r3 = await builder._run_hotel_subgraph(state)
+    r3 = await builder._run_hotels(state)
     t_hotel = time.time()
 
     serial_total = t_hotel - t0
-    print(f"  attractions: {t_attr - t0:.2f}s, response_len={len(r1.get('attraction_response', ''))}")
-    print(f"  weather:     {t_weather - t_attr:.2f}s, response_len={len(r2.get('weather_response', ''))}")
+    print(f"  retrieve:    {t_attr - t0:.2f}s, docs={len(r1.get('kb_docs', []))}")
+    print(f"  search_amap: {t_amap - t_attr:.2f}s, len={len(r_amap.get('amap_results', ''))}")
+    print(f"  weather:     {t_weather - t_amap:.2f}s, response_len={len(r2.get('weather_response', ''))}")
     print(f"  hotels:      {t_hotel - t_weather:.2f}s, response_len={len(r3.get('hotel_response', ''))}")
     print(f"  串行合计:    {serial_total:.2f}s")
 
     # 2) 并发 gather
     print("\n[2] asyncio.gather 并发执行...")
     t0 = time.time()
-    merged = await builder.run_parallel_subgraphs(state)
+    merged = await builder.run_parallel_fetch(state)
     parallel_total = time.time() - t0
     print(f"  attraction_len={len(merged.get('attraction_response', ''))}")
     print(f"  weather_len={len(merged.get('weather_response', ''))}")
@@ -76,7 +79,7 @@ async def main():
     print("\n[3] 主图异步节点注册检查...")
     app = builder.get_trip_planner_graph()
     print(f"  ✅ 主图编译成功: {type(app).__name__}")
-    print("  节点 attractions/weather/hotels 为 async，需通过 agent.aplan_trip / ainvoke 触发并发")
+    print("  节点 retrieve/search_amap/weather/hotels 为 async，需通过 agent.aplan_trip / ainvoke 触发并发")
 
     print("\n" + "=" * 70)
     print("验证完成")

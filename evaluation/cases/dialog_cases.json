@@ -1,0 +1,69 @@
+[
+  {
+    "id": "replace_with_tool",
+    "expected_change_type": "modify_attractions",
+    "change_type": "modify_attractions",
+    "tool_calls": ["smart_attraction_search"],
+    "search_names": ["上海迪士尼度假区"],
+    "removed": ["外滩"],
+    "added": ["上海迪士尼度假区"],
+    "before_names": ["外滩", "豫园"],
+    "after_names": ["上海迪士尼度假区", "豫园"],
+    "before_version": 1,
+    "after_version": 2
+  },
+  {
+    "id": "hotel_with_tool",
+    "expected_change_type": "modify_hotel",
+    "change_type": "modify_hotel",
+    "tool_calls": ["hotel_search"],
+    "search_hotel": "99优选酒店",
+    "added_hotel": "99优选酒店",
+    "after_hotel": "99优选酒店",
+    "before_version": 1,
+    "after_version": 2
+  },
+  {
+    "id": "replace_without_tool",
+    "expected_change_type": "modify_attractions",
+    "change_type": "modify_attractions",
+    "tool_calls": [],
+    "search_names": [],
+    "removed": ["外滩"],
+    "added": ["迪士尼"],
+    "before_names": ["外滩", "豫园"],
+    "after_names": ["迪士尼", "豫园"],
+    "before_version": 1,
+    "after_version": 2
+  },
+  {
+    "id": "name_not_in_search",
+    "expected_change_type": "add_item",
+    "change_type": "add_item",
+    "tool_calls": ["smart_attraction_search"],
+    "search_names": ["外滩"],
+    "added": ["迪士尼"],
+    "before_names": ["豫园"],
+    "after_names": ["豫园", "迪士尼"],
+    "before_version": 2,
+    "after_version": 3
+  },
+  {
+    "id": "budget_no_tool",
+    "expected_change_type": "modify_budget",
+    "change_type": "modify_budget",
+    "tool_calls": [],
+    "before_version": 2,
+    "after_version": 3
+  },
+  {
+    "id": "hotel_mislabeled_budget",
+    "expected_change_type": "modify_hotel",
+    "change_type": "modify_budget",
+    "tool_calls": [],
+    "before_hotel": "经济型",
+    "after_hotel": "经济型",
+    "before_version": 1,
+    "after_version": 1
+  }
+]

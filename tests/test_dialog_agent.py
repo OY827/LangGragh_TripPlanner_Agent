@@ -73,89 +73,34 @@ def test_dialog_integration():
         current_version_id = state_values.get("current_version_id", "")
         print(f"\n⚠️  从state获取: session_id={session_id}")
 
-    print(f"\n✅ 规划完成，session_id: {session_id}")
+    print(f"\n✅ 规划完成，thread_id: {TEST_THREAD_ID}")
+    print(result.get("dialog_reply") or "")
 
-    if session_id:
-        # 测试版本管理
-        print("\n" + "-" * 70)
-        print("测试版本管理")
-        print("-" * 70)
-
-        version_manager = VersionManager(use_redis=False)
-        session = version_manager.get_session(session_id)
-
-        if session:
-            print(f"\n📌 会话信息：")
-            print(f"  Session ID: {session.session_id}")
-            print(f"  User ID: {session.user_id}")
-            print(f"  版本数量: {session.get_version_count()}")
-
-            current_version = version_manager.get_current_version(session_id)
-            if current_version:
-                print(f"\n📋 当前版本：")
-                print(f"  Version ID: {current_version.version_id}")
-                print(f"  Version Number: v{current_version.version_number}")
-                print(f"  Created by: {current_version.created_by}")
-
-                plan_data = current_version.plan_data
-                print(f"\n计划数据：")
-                print(f"  城市: {plan_data.get('city', '')}")
-                print(f"  天数: {plan_data.get('duration_days', 0)}天")
-                print(f"  景点: {', '.join(plan_data.get('attractions', []))}")
-                budget_data = plan_data.get('budget', {})
-                if isinstance(budget_data, dict):
-                    print(f"  预算: {budget_data.get('total', 0)}元")
-        else:
-            print("⚠️  未找到会话")
-
-    # 测试对话修改
-    print("\n" + "=" * 70)
-    print("测试对话修改")
-    print("=" * 70)
-
-    # 模拟用户输入
     user_inputs = [
-        "",
         "添加迪士尼",
         "降低酒店预算",
-        "结束"
+        "结束",
     ]
 
     for i, user_input in enumerate(user_inputs, 1):
-        print(f"\n[轮次 {i}] 用户输入: {user_input if user_input else '(初始提示)'}")
+        print(f"\n[轮次 {i}] 用户输入: {user_input}")
+        dialog_result = agent.resume_dialog(TEST_THREAD_ID, user_input)
+        if dialog_result.get("error"):
+            print(f"⚠️  恢复失败: {dialog_result['error']}")
+            break
 
-        # 获取当前state
-        config = {"configurable": {"thread_id": TEST_THREAD_ID}}
-        current_state = agent.app.get_state(config).values
-
-        if not current_state:
-            print("⚠️  无法获取state，跳过")
-            continue
-
-        # 更新state，注入用户输入
-        current_state["dialog_input"] = user_input
-
-        # 调用dialog节点
-        from app.agents.langgraph_nodes import GraphNodes
-        nodes = agent.nodes  # 复用agent的nodes实例，避免重复初始化
-
-        dialog_result = nodes.dialog(current_state)
-
-        print(f"\n🤖 Agent回复：")
-        reply = dialog_result.get("dialog_reply", "")
-        print(reply)
+        print("\n🤖 Agent回复：")
+        print(dialog_result.get("dialog_reply", ""))
 
         if dialog_result.get("dialog_changes"):
-            print(f"\n变更内容：")
+            print("\n变更内容：")
             for change in dialog_result["dialog_changes"]:
                 print(f"  • {change}")
 
         if dialog_result.get("current_version_id"):
             print(f"\n新版本ID: {dialog_result['current_version_id']}")
-            current_version_id = dialog_result["current_version_id"]
 
-        # 检查是否结束
-        if not dialog_result.get("dialog_active", True):
+        if not dialog_result.get("awaiting_input", True):
             print("\n✅ 对话结束")
             break
 
@@ -165,6 +110,7 @@ def test_dialog_integration():
         print("版本历史")
         print("=" * 70)
 
+        version_manager = VersionManager(use_redis=False)
         history = version_manager.get_version_history(session_id)
         print(f"\n共有 {len(history)} 个版本：")
         for v in history:

@@ -646,7 +646,8 @@
     <script>
         let currentTripPlan = null;
         let currentTripMeta = null;
-        let dialogSessionId = null;
+        let dialogThreadId = null;
+        let dialogWelcome = '';
 
         function appendMessage(role, text) {
             const container = document.getElementById('chatMessages');
@@ -674,47 +675,16 @@
         }
 
         async function enterChatPanel() {
-            if (!currentTripPlan) {
+            if (!currentTripPlan || !dialogThreadId) {
                 alert('请先生成旅行计划');
                 return;
             }
 
-            const btn = document.querySelector('#enterChatBar .btn-secondary');
-            btn.disabled = true;
-            btn.textContent = '正在进入对话...';
-
-            try {
-                const response = await fetch('/api/dialog/session', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        user_id: currentTripMeta.user_id,
-                        trip_plan: currentTripPlan,
-                        transportation: currentTripMeta.transportation,
-                        accommodation: currentTripMeta.accommodation,
-                        travel_days: currentTripMeta.travel_days,
-                    })
-                });
-
-                const result = await response.json();
-                if (!result.success || !result.session_id) {
-                    throw new Error(result.message || '创建对话会话失败');
-                }
-
-                dialogSessionId = result.session_id;
-
-                document.getElementById('chatMessages').innerHTML = '';
-                appendMessage('system', result.welcome_message || '对话已就绪，请输入修改指令。');
-                document.getElementById('chatPlanPreview').innerHTML = renderTripPlan(currentTripPlan);
-
-                showChatView();
-                document.getElementById('chatInput').focus();
-            } catch (error) {
-                alert('进入对话失败：' + error.message);
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '💬 进入对话修改';
-            }
+            document.getElementById('chatMessages').innerHTML = '';
+            appendMessage('system', dialogWelcome || '对话已就绪，请输入修改指令。');
+            document.getElementById('chatPlanPreview').innerHTML = renderTripPlan(currentTripPlan);
+            showChatView();
+            document.getElementById('chatInput').focus();
         }
 
         async function sendChatMessage() {
@@ -722,7 +692,7 @@
             const sendBtn = document.getElementById('sendChatBtn');
             const message = input.value.trim();
 
-            if (!message || !dialogSessionId) return;
+            if (!message || !dialogThreadId) return;
 
             input.value = '';
             appendMessage('user', message);
@@ -735,7 +705,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        session_id: dialogSessionId,
+                        thread_id: dialogThreadId,
                         message: message,
                     })
                 });
@@ -790,7 +760,8 @@
             
             resultSection.classList.remove('active');
             enterChatBar.style.display = 'none';
-            dialogSessionId = null;
+            dialogThreadId = null;
+            dialogWelcome = '';
             showPlanningView();
 
             const preferences = [];
@@ -823,6 +794,8 @@
 
                 if (result.success && result.data) {
                     currentTripPlan = result.data;
+                    dialogThreadId = result.thread_id || null;
+                    dialogWelcome = result.welcome_message || '';
                     currentTripMeta = {
                         user_id: requestData.user_id,
                         transportation: requestData.transportation,

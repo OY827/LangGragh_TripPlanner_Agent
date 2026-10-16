@@ -114,15 +114,27 @@ class HotelMCPService:
         stay_nights: int = 1,
         size: int = 8,
     ) -> str:
-        hotels = self.search_hotels(
+        hotels = self.sort_by_price(self.search_hotels(
             city=city,
             keywords=keywords,
             accommodation=accommodation,
             check_in_date=check_in_date,
             stay_nights=stay_nights,
             size=size,
-        )
+        ))
         return self.format_for_agent(hotels, city=city)
+
+    def sort_by_price(self, hotels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """有报价的排前面，并按每晚价格从低到高。"""
+
+        def sort_key(hotel: Dict[str, Any]):
+            text = self._format_price(hotel)
+            match = re.search(r"\d+(?:\.\d+)?", text.replace(",", "")) if text else None
+            if not match:
+                return (1, 0.0)
+            return (0, float(match.group(0)))
+
+        return sorted(hotels, key=sort_key)
 
     def format_for_agent(self, hotels: List[Dict[str, Any]], city: str = "") -> str:
         if not hotels:

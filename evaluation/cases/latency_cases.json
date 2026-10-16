@@ -1,0 +1,16 @@
+[
+  {
+    "id": "plan_a",
+    "tool_latency_s": [1.0, 1.4],
+    "serial_s": 10.0,
+    "parallel_s": 6.0,
+    "e2e_s": 12.0
+  },
+  {
+    "id": "plan_b",
+    "tool_latency_s": [1.0],
+    "serial_s": 5.0,
+    "parallel_s": 4.0,
+    "e2e_s": 8.0
+  }
+]

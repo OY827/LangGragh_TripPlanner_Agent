@@ -1,0 +1,22 @@
+[
+  {
+    "id": "history_partial",
+    "query": "上海的历史文化景点",
+    "intent_categories": ["历史文化"],
+    "relevant_docs": ["外滩", "豫园", "上海博物馆", "城隍庙", "龙华寺"],
+    "retrieved_titles": ["外滩", "南京路步行街", "豫园", "上海博物馆", "上海迪士尼度假区"],
+    "categories": ["历史文化", "购物", "历史文化", "历史文化", "主题乐园"],
+    "retrieved_pool": ["外滩", "豫园", "上海博物馆", "城隍庙", "南京路步行街"],
+    "grounded": true
+  },
+  {
+    "id": "history_perfect",
+    "query": "上海博物馆",
+    "intent_categories": ["历史文化"],
+    "relevant_docs": ["上海博物馆", "上海博物馆(东馆)", "外滩", "豫园", "人民广场"],
+    "retrieved_titles": ["上海博物馆", "上海博物馆(东馆)", "外滩", "豫园", "人民广场"],
+    "categories": ["历史文化", "历史文化", "历史文化", "历史文化", "历史文化"],
+    "retrieved_pool": ["上海博物馆", "上海博物馆(东馆)", "外滩", "豫园", "人民广场"],
+    "grounded": false
+  }
+]

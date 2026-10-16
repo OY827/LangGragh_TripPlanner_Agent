@@ -23,28 +23,11 @@ def test_graph_compilation():
     from app.agents.langgraph_builder import LangGraphBuilder
     
     builder = LangGraphBuilder()
-    
-    # 景点子图
-    attraction_app = builder.get_attraction_graph()
-    print(f"  ✅ 景点子图编译成功")
-    print(f"     节点: start, retrieve||search_amap, merge, reflect, generate")
-    print(f"     边: start→(retrieve||search_amap)→merge→reflect→(generate|start)")
-    
-    # 天气子图
-    weather_app = builder.get_weather_graph()
-    print(f"  ✅ 天气子图编译成功")
-    print(f"     节点: fetch")
-    
-    # 酒店子图
-    hotel_app = builder.get_hotel_graph()
-    print(f"  ✅ 酒店子图编译成功")
-    print(f"     节点: search, reflect")
-    
-    # 主图
+
     trip_app = builder.get_trip_planner_graph()
     print(f"  ✅ 主旅行规划图编译成功")
-    print(f"     节点: init, memory, prepare, attractions||weather||hotels → route → plan → reflect → save")
-    print(f"     并行: attractions / weather / hotels 从 prepare fan-out，汇聚到 route")
+    print(f"     四路: retrieve / search_amap / weather / hotels")
+    print(f"     merge 只等 retrieve 与 search_amap，再和 weather、hotels 汇入 route")
     
     return True
 
@@ -120,12 +103,11 @@ def test_state_update():
     
     # 测试条件路由逻辑
     def route_after_reflect(state):
-        phase = state.get("current_phase", "final")
-        if phase == "reflect":
-            return "attractions" if state.get("iteration_count", 0) <= 1 else "plan"
+        if state.get("current_phase") == "reflect":
+            return "plan"
         return "final"
     
-    assert route_after_reflect({"current_phase": "reflect", "iteration_count": 0}) == "attractions"
+    assert route_after_reflect({"current_phase": "reflect", "iteration_count": 0}) == "plan"
     assert route_after_reflect({"current_phase": "reflect", "iteration_count": 2}) == "plan"
     assert route_after_reflect({"current_phase": "final"}) == "final"
     print(f"  ✅ 条件路由逻辑正确")
@@ -200,29 +182,15 @@ def test_graph_visualization():
     
     builder = LangGraphBuilder()
     
-    # 打印景点子图结构
-    print("\n  📋 景点子图结构:")
-    print("    Entry → start → (retrieve || search_amap) → merge → reflect")
-    print("      ├─ (pass) → generate → END")
-    print("      └─ (fail, iter<2) → start")
-    print("      └─ (fail, iter≥2) → generate → END")
-    
-    # 打印酒店子图结构
-    print("\n  📋 酒店子图结构:")
-    print("    Entry → search → reflect")
-    print("      ├─ (pass) → END")
-    print("      └─ (fail, iter<2) → search")
-    print("      └─ (fail, iter≥2) → END")
-    
-    # 打印主图结构
     print("\n  📋 主旅行规划图结构:")
     print("    Entry → init → memory → prepare")
-    print("              ↘ attractions ↘")
-    print("               → weather   → route → plan → reflect")
-    print("              ↗ hotels    ↗")
-    print("        ├─ (retry) → prepare")
+    print("              ├─ retrieve ─┐")
+    print("              ├─ search_amap ┴→ merge ─┐")
+    print("              ├─ weather              ├→ route → plan → reflect")
+    print("              └─ hotels ──────────────┘")
     print("        ├─ (replan) → plan")
-    print("        └─ (done) → save → save_version → dialog → END")
+    print("        └─ (done) → save → save_version → dialog（interrupt 暂停）")
+    print("              恢复后改计划，再回到 dialog；结束则 END")
     
     return True
 

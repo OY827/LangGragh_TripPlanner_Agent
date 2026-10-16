@@ -1,213 +1,131 @@
 """
-LangGraph 构建器 - 构建子图和主图
+LangGraph 构建器 - 构建主图
 
 架构：
-- AttractionGraph: 景点子图（RAG检索 || 高德搜索 → 合并 → 反思 → 生成）
-- WeatherGraph: 天气子图
-- HotelGraph: 酒店子图（检索→反思→重试/生成）
-- TripPlannerGraph: 主图（景点/天气/酒店异步并发 → 汇聚规划 + 反思循环）
+- 知识库检索、高德景点、天气、酒店四路同时出发
+- 合并节点只等知识库和高德，route 再等合并结果、天气和酒店
+- 只调用一次规划模型；反思不通过时重生成行程
 
 并行阶段：
-1. 主图 fan-out 三个异步节点，通过 ainvoke 同一步并发调度
-2. 各子图在线程池中执行同步 I/O（RAG/高德），避免阻塞事件循环
-3. 仅回写各子图专属字段，避免同一步并发写冲突
+1. 主图 fan-out 四个异步节点，通过 ainvoke 同一步并发调度
+2. 各节点在线程池中执行同步 I/O，避免阻塞事件循环
+3. 仅回写各自专属字段，避免同一步并发写冲突
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from typing import Optional, Any, Dict
+from urllib.parse import quote
+
+from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
-from .langgraph_state import AttractionState, WeatherState, HotelState, TripState
+from .langgraph_state import TripState
 from .langgraph_nodes import GraphNodes
 
 
-def _passthrough(state: Dict[str, Any]) -> Dict[str, Any]:
-    """空节点，仅用于 fan-out 入口"""
-    return {}
+def build_redis_url(
+    host: str = "localhost",
+    port: int = 6379,
+    password: str = "",
+) -> str:
+    """拼出和版本管理同一套主机、端口、密码的 Redis 地址。"""
+    if password:
+        return f"redis://:{quote(password, safe='')}@{host}:{port}/0"
+    return f"redis://{host}:{port}/0"
+
+
+def redis_url_from_env() -> str:
+    load_dotenv()
+    host = os.getenv("REDIS_HOST", "localhost")
+    port = int(os.getenv("REDIS_PORT", "6379"))
+    password = os.getenv("REDIS_PASSWORD", "") or ""
+    return build_redis_url(host, port, password)
+
+
+def read_interrupt(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """取出图暂停时交给调用方的内容。没有暂停则返回 None。"""
+    raw = result.get("__interrupt__") if isinstance(result, dict) else None
+    if not raw:
+        return None
+    item = raw[0]
+    value = getattr(item, "value", None)
+    if value is None and isinstance(item, dict):
+        value = item.get("value")
+    if isinstance(value, dict):
+        return value
+    return {"reply": "" if value is None else str(value)}
 
 
 class LangGraphBuilder:
     """
     LangGraph 构建器
 
-    负责创建和编译所有 Agent 图。
-    子图通过异步包装函数作为主图节点，实现状态字段映射与并发执行。
+    只编译主图。知识库、高德、天气、酒店都是主图上的节点。
     """
 
     def __init__(self, nodes: Optional[GraphNodes] = None):
         self.nodes = nodes or GraphNodes()
-
-        self._attraction_graph = None
-        self._weather_graph = None
-        self._hotel_graph = None
         self._trip_graph = None
 
-        self._attraction_app = None
-        self._weather_app = None
-        self._hotel_app = None
+    # ==================== 并行节点 ====================
 
-    # ==================== 景点子图 ====================
+    async def _run_retrieve(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """知识库检索。"""
+        return await asyncio.to_thread(self.nodes.retrieve_knowledge, state)
 
-    def build_attraction_graph(self) -> StateGraph:
-        """构建景点子图（RAG检索与高德搜索异步并行，再合并）"""
-        graph = StateGraph(AttractionState)
+    async def _run_amap(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """高德景点搜索。"""
+        return await asyncio.to_thread(self.nodes.search_amap, state)
 
-        graph.add_node("start", _passthrough)
-        graph.add_node("retrieve", self.nodes.retrieve_knowledge)
-        graph.add_node("search_amap", self.nodes.search_amap)
-        graph.add_node("merge", self.nodes.merge_attraction_results)
-        graph.add_node("reflect", self.nodes.reflect_attractions)
-        graph.add_node("generate", self.nodes.generate_attraction_response)
+    # ==================== 天气 / 酒店节点 ====================
 
-        graph.set_entry_point("start")
-        # 内部并行：知识库检索 || 高德搜索
-        graph.add_edge("start", "retrieve")
-        graph.add_edge("start", "search_amap")
-        graph.add_edge("retrieve", "merge")
-        graph.add_edge("search_amap", "merge")
-        graph.add_edge("merge", "reflect")
-
-        graph.add_conditional_edges(
-            "reflect",
-            self.nodes.route_after_reflect_attractions,
+    async def _run_weather(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """直接查高德天气，不经过模型。"""
+        return await asyncio.to_thread(
+            self.nodes.fetch_weather,
             {
-                "generate": "generate",
-                "retrieve": "start",  # 重试时重新并行检索
-            }
+                "city": state.get("city", ""),
+                "start_date": state.get("start_date", ""),
+                "end_date": state.get("end_date", ""),
+            },
         )
 
-        graph.add_edge("generate", END)
-
-        self._attraction_graph = graph
-        return graph
-
-    def _get_attraction_app(self):
-        if self._attraction_app is None:
-            if self._attraction_graph is None:
-                self.build_attraction_graph()
-            self._attraction_app = self._attraction_graph.compile()
-        return self._attraction_app
-
-    async def _run_attraction_subgraph(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """景点子图异步包装：在线程池中执行同步子图，不阻塞事件循环"""
-        subgraph_input = {
-            "query": state.get("query", ""),
-            "city": state.get("city", ""),
-            "preferences": state.get("preferences", []),
-            "visited_attractions": state.get("visited_attractions", []),
-            "iteration_count": 0,
-        }
-
-        app = self._get_attraction_app()
-        result = await asyncio.to_thread(app.invoke, subgraph_input)
-
-        return {
-            "kb_docs": result.get("kb_docs", []),
-            "amap_results": result.get("amap_results", ""),
-            "merged_results": result.get("merged_results", ""),
-            "attraction_response": result.get("attraction_response", ""),
-        }
-
-    # ==================== 天气子图 ====================
-
-    def build_weather_graph(self) -> StateGraph:
-        """构建天气子图"""
-        graph = StateGraph(WeatherState)
-
-        graph.add_node("fetch", self.nodes.fetch_weather)
-        graph.set_entry_point("fetch")
-        graph.add_edge("fetch", END)
-
-        self._weather_graph = graph
-        return graph
-
-    def _get_weather_app(self):
-        if self._weather_app is None:
-            if self._weather_graph is None:
-                self.build_weather_graph()
-            self._weather_app = self._weather_graph.compile()
-        return self._weather_app
-
-    async def _run_weather_subgraph(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """天气子图异步包装"""
-        subgraph_input = {
-            "city": state.get("city", ""),
-            "start_date": state.get("start_date", ""),
-            "end_date": state.get("end_date", ""),
-        }
-
-        app = self._get_weather_app()
-        result = await asyncio.to_thread(app.invoke, subgraph_input)
-
-        return {
-            "weather_response": result.get("weather_response", ""),
-        }
-
-    # ==================== 酒店子图 ====================
-
-    def build_hotel_graph(self) -> StateGraph:
-        """构建酒店子图"""
-        graph = StateGraph(HotelState)
-
-        graph.add_node("search", self.nodes.search_hotels)
-        graph.add_node("reflect", self.nodes.reflect_hotels)
-
-        graph.set_entry_point("search")
-        graph.add_edge("search", "reflect")
-
-        graph.add_conditional_edges(
-            "reflect",
-            self.nodes.route_after_reflect_hotels,
+    async def _run_hotels(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """按主图里的日期和天数直接搜酒店。"""
+        return await asyncio.to_thread(
+            self.nodes.search_hotels,
             {
-                "search": "search",
-                "end": END,
-            }
+                "city": state.get("city", ""),
+                "accommodation": state.get("accommodation", ""),
+                "start_date": state.get("start_date", ""),
+                "travel_days": state.get("travel_days", 1),
+            },
         )
 
-        self._hotel_graph = graph
-        return graph
-
-    def _get_hotel_app(self):
-        if self._hotel_app is None:
-            if self._hotel_graph is None:
-                self.build_hotel_graph()
-            self._hotel_app = self._hotel_graph.compile()
-        return self._hotel_app
-
-    async def _run_hotel_subgraph(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """酒店子图异步包装"""
-        subgraph_input = {
-            "city": state.get("city", ""),
-            "accommodation": state.get("accommodation", ""),
-            "iteration_count": 0,
-        }
-
-        app = self._get_hotel_app()
-        result = await asyncio.to_thread(app.invoke, subgraph_input)
-
-        return {
-            "hotel_response": result.get("hotel_response", ""),
-        }
-
-    async def run_parallel_subgraphs(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def run_parallel_fetch(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
-        显式并发执行三个子图（供调试/单测使用）。
+        显式并发执行知识库、高德、天气、酒店（供调试/单测使用）。
 
-        主图通过 fan-out 异步节点实现同等并发；本方法用 gather 做对照验证。
+        主图通过 fan-out 实现同等并发；本方法用 gather 做对照验证。
+        知识库和高德都返回后，再合并成景点候选。
         """
-        attraction_result, weather_result, hotel_result = await asyncio.gather(
-            self._run_attraction_subgraph(state),
-            self._run_weather_subgraph(state),
-            self._run_hotel_subgraph(state),
+        retrieve_result, amap_result, weather_result, hotel_result = await asyncio.gather(
+            self._run_retrieve(state),
+            self._run_amap(state),
+            self._run_weather(state),
+            self._run_hotels(state),
             return_exceptions=True,
         )
 
         merged: Dict[str, Any] = {"current_phase": "parallel_fetch"}
 
         for name, result in [
-            ("attractions", attraction_result),
+            ("retrieve", retrieve_result),
+            ("amap", amap_result),
             ("weather", weather_result),
             ("hotels", hotel_result),
         ]:
@@ -216,18 +134,23 @@ class LangGraphBuilder:
             elif isinstance(result, dict):
                 merged.update(result)
 
+        if not isinstance(retrieve_result, Exception) and not isinstance(amap_result, Exception):
+            merged.update(self.nodes.merge_attraction_results({**state, **merged}))
+
         return merged
 
     # ==================== 主图 ====================
 
     def build_trip_planner_graph(self) -> StateGraph:
-        """构建主旅行规划图（含异步并行检索与对话循环）
+        """构建主旅行规划图。
 
         流程：
             init → memory → prepare
-                 ↘ attractions ↘
-                  → weather   → route → plan → reflect → ...
-                 ↗ hotels    ↗
+                 ├─ retrieve ─┐
+                 ├─ search_amap ┴→ merge ─┐
+                 ├─ weather              ├→ route → plan → reflect
+                 └─ hotels ──────────────┘
+            反思不通过时只重新生成行程，不重跑检索。
         """
         graph = StateGraph(TripState)
 
@@ -235,10 +158,11 @@ class LangGraphBuilder:
         graph.add_node("memory", self.nodes.query_memory)
         graph.add_node("build_attraction_query", self.nodes.build_attraction_query)
 
-        # 异步节点：主图 ainvoke 时同一步并发调度
-        graph.add_node("attractions", self._run_attraction_subgraph)
-        graph.add_node("weather", self._run_weather_subgraph)
-        graph.add_node("hotels", self._run_hotel_subgraph)
+        graph.add_node("retrieve", self._run_retrieve)
+        graph.add_node("search_amap", self._run_amap)
+        graph.add_node("weather", self._run_weather)
+        graph.add_node("hotels", self._run_hotels)
+        graph.add_node("merge", self.nodes.merge_attraction_results)
 
         graph.add_node("route", self.nodes.plan_routes)
         graph.add_node("plan", self.nodes.generate_trip_plan)
@@ -253,13 +177,15 @@ class LangGraphBuilder:
         graph.add_edge("init", "memory")
         graph.add_edge("memory", "build_attraction_query")
 
-        # 异步 fan-out
-        graph.add_edge("build_attraction_query", "attractions")
+        graph.add_edge("build_attraction_query", "retrieve")
+        graph.add_edge("build_attraction_query", "search_amap")
         graph.add_edge("build_attraction_query", "weather")
         graph.add_edge("build_attraction_query", "hotels")
 
-        # fan-in
-        graph.add_edge("attractions", "route")
+        graph.add_edge("retrieve", "merge")
+        graph.add_edge("search_amap", "merge")
+
+        graph.add_edge("merge", "route")
         graph.add_edge("weather", "route")
         graph.add_edge("hotels", "route")
         graph.add_edge("route", "plan")
@@ -269,7 +195,6 @@ class LangGraphBuilder:
             "reflect",
             self.nodes.route_after_reflect_trip,
             {
-                "build_attraction_query": "build_attraction_query",
                 "plan": "plan",
                 "final": "save",
             }
@@ -291,24 +216,10 @@ class LangGraphBuilder:
         return graph
 
     def _route_after_dialog(self, state: Dict[str, Any]) -> str:
-        """对话后的条件路由"""
-        if not state.get("dialog_active", False):
-            return "final"
-        if state.get("dialog_input"):
+        """改完计划后回到对话节点，再次 interrupt 等待下一条。"""
+        if state.get("dialog_active", False):
             return "continue"
         return "final"
-
-    def get_attraction_graph(self):
-        """获取编译后的景点子图"""
-        return self._get_attraction_app()
-
-    def get_weather_graph(self):
-        """获取编译后的天气子图"""
-        return self._get_weather_app()
-
-    def get_hotel_graph(self):
-        """获取编译后的酒店子图"""
-        return self._get_hotel_app()
 
     def get_trip_planner_graph(self):
         if self._trip_graph is None:
@@ -324,29 +235,25 @@ class LangGraphBuilder:
 
 class TripPlannerAgent:
     """
-    基于 LangGraph 的旅行规划 Agent（默认异步并发执行并行子图）
+    基于 LangGraph 的旅行规划 Agent（知识库、高德、天气、酒店异步并发）
     """
 
     def __init__(
         self,
         llm_provider: str = "aliyun",
         llm_model: str = None,
-        use_redis: bool = False,
-        redis_url: str = "redis://localhost:6379",
+        use_redis: bool = True,
+        redis_url: str = None,
     ):
         self.nodes = GraphNodes(llm_provider=llm_provider, llm_model=llm_model)
         self.builder = LangGraphBuilder(nodes=self.nodes)
+        self.redis_url = redis_url
+        self.checkpointer_backend = "none"
 
         self.checkpointer = None
-        if use_redis:
-            try:
-                from langgraph.checkpoint.redis import RedisSaver
-                self.checkpointer = RedisSaver(redis_url)
-                print(f"✅ Redis Checkpointer 已连接: {redis_url}")
-            except (ImportError, Exception) as e:
-                print(f"⚠️  Redis 连接失败: {e}")
-                self._setup_memory_checkpointer()
-        else:
+        if use_redis and not self._setup_redis_checkpointer():
+            self._setup_memory_checkpointer()
+        elif not use_redis:
             self._setup_memory_checkpointer()
 
         self.app = self._compile_app()
@@ -362,10 +269,37 @@ class TripPlannerAgent:
 
         print("✅ LangGraph 旅行规划 Agent 初始化完成（异步并发已启用）")
 
+    def _setup_redis_checkpointer(self) -> bool:
+        """把主图暂停点写到 Redis。连不上或无法建索引时返回 False。"""
+        url = self.redis_url or redis_url_from_env()
+        try:
+            import redis
+            from redis.backoff import NoBackoff
+            from redis.retry import Retry
+            from langgraph.checkpoint.redis import RedisSaver
+
+            client = redis.Redis.from_url(
+                url,
+                socket_timeout=2,
+                socket_connect_timeout=2,
+                retry=Retry(NoBackoff(), 0),
+            )
+            client.ping()
+            saver = RedisSaver(redis_client=client)
+            saver.setup()
+            self.checkpointer = saver
+            self.checkpointer_backend = "redis"
+            print(f"✅ Redis Checkpointer 已连接: {url.split('@')[-1]}")
+            return True
+        except Exception as e:
+            print(f"⚠️  Redis Checkpointer 连接失败，改用内存: {e}")
+            return False
+
     def _setup_memory_checkpointer(self):
         try:
             from langgraph.checkpoint.memory import MemorySaver
             self.checkpointer = MemorySaver()
+            self.checkpointer_backend = "memory"
             print("✅ 内存 Checkpointer 已启用")
         except ImportError:
             self.checkpointer = None
@@ -379,7 +313,7 @@ class TripPlannerAgent:
     def _ensure_thread_id(self, thread_id: Optional[str] = None):
         """确保 Checkpointer 始终有 thread_id"""
         if self.checkpointer:
-            return thread_id or f"session_{id(self)}_{__import__('time').time()}"
+            return thread_id or uuid.uuid4().hex
         return None
 
     def _build_input_state(
@@ -467,7 +401,7 @@ class TripPlannerAgent:
                 preferences,
             )
 
-        return self._format_result(result)
+        return self._format_result(result, thread_id)
 
     def plan_trip(
         self,
@@ -527,7 +461,15 @@ class TripPlannerAgent:
             "iteration_count": 0,
         }
 
-    def _format_result(self, result: Dict) -> Dict:
+    def _format_result(self, result: Dict, thread_id: str = None) -> Dict:
+        if not isinstance(result, dict):
+            result = {}
+        paused = read_interrupt(result)
+        reply = ""
+        if paused and paused.get("reply"):
+            reply = str(paused["reply"])
+        elif result.get("dialog_reply"):
+            reply = str(result.get("dialog_reply"))
         return {
             "city": result.get("city", ""),
             "trip_plan": result.get("trip_plan", ""),
@@ -539,8 +481,14 @@ class TripPlannerAgent:
             "iteration_count": result.get("iteration_count", 0),
             "budget": result.get("budget"),
             "budget_total": result.get("budget_total", 0),
-            "session_id": result.get("session_id", ""),
+            "travel_days": result.get("travel_days", 1),
+            "session_id": result.get("session_id") or (paused or {}).get("session_id", ""),
             "current_version_id": result.get("current_version_id", ""),
+            "thread_id": thread_id or "",
+            "dialog_reply": reply,
+            "dialog_changes": result.get("dialog_changes") or [],
+            "dialog_active": bool(result.get("dialog_active")),
+            "awaiting_input": paused is not None,
         }
 
     def get_state_history(self, thread_id: str) -> list:
@@ -557,6 +505,46 @@ class TripPlannerAgent:
             return history
         except Exception:
             return []
+
+    async def aresume_dialog(self, thread_id: str, user_text: str) -> Dict[str, Any]:
+        """用同一 thread_id 把用户的修改送回暂停中的主图。"""
+        from langgraph.types import Command
+        from app.monitoring import merge_run_config
+
+        if not self.checkpointer or not thread_id:
+            return {"error": "没有可恢复的规划会话", "thread_id": thread_id or ""}
+
+        config = merge_run_config(
+            {"configurable": {"thread_id": thread_id}},
+            run_name="langgraph_resume_dialog",
+            thread_id=thread_id,
+            tags=["langgraph", "dialog"],
+        )
+        try:
+            result = await self.app.ainvoke(Command(resume=user_text), config)
+        except Exception as e:
+            print(f"❌ 对话恢复失败: {e}")
+            return {"error": str(e), "thread_id": thread_id}
+        return self._format_result(result, thread_id)
+
+    def resume_dialog(self, thread_id: str, user_text: str) -> Dict[str, Any]:
+        """同步恢复对话。已在事件循环中时改到新线程执行。"""
+        try:
+            asyncio.get_running_loop()
+            in_running_loop = True
+        except RuntimeError:
+            in_running_loop = False
+
+        if not in_running_loop:
+            return asyncio.run(self.aresume_dialog(thread_id, user_text))
+
+        import concurrent.futures
+
+        def _run():
+            return asyncio.run(self.aresume_dialog(thread_id, user_text))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_run).result()
 
     async def aresume_from_checkpoint(self, thread_id: str) -> Optional[Dict]:
         """异步从断点恢复会话"""

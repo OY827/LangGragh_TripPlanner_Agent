@@ -142,11 +142,11 @@ def step_plan(days: int, start: str, end: str) -> tuple[bool, dict]:
     )
     print(f"  规划耗时 {time.time() - t1:.1f}s")
 
-    print("\n  --- 景点子图 ---")
+    print("\n  --- 景点检索 ---")
     print("   ", _clip(result.get("attraction_response"), 800))
-    print("\n  --- 天气子图 ---")
+    print("\n  --- 天气节点 ---")
     print("   ", _clip(result.get("weather_response"), 500))
-    print("\n  --- 酒店子图 ---")
+    print("\n  --- 酒店节点 ---")
     print("   ", _clip(result.get("hotel_response"), 500))
     print("\n  --- 行程原文 ---")
     print("   ", _clip(result.get("trip_plan"), 800))
@@ -161,9 +161,9 @@ def step_plan(days: int, start: str, end: str) -> tuple[bool, dict]:
         (result.get("trip_plan_parsed") or {}).get("days")
     )
     ok = all([
-        _ok("景点子图有输出", bool((result.get("attraction_response") or "").strip())),
-        _ok("天气子图有输出", bool((result.get("weather_response") or "").strip())),
-        _ok("酒店子图有输出", bool((result.get("hotel_response") or "").strip())),
+        _ok("景点检索有输出", bool((result.get("attraction_response") or "").strip())),
+        _ok("天气节点有输出", bool((result.get("weather_response") or "").strip())),
+        _ok("酒店节点有输出", bool((result.get("hotel_response") or "").strip())),
         _ok("生成了可解析行程", parsed_ok, f"景点 {len(names)} 个"),
         _ok("写入了会话版本", bool(result.get("session_id"))),
     ])
