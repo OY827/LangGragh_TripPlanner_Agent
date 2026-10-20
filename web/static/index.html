@@ -555,6 +555,18 @@
                     </select>
                 </div>
                 <div class="form-group">
+                    <label for="hotel_budget">每晚预算</label>
+                    <select id="hotel_budget">
+                        <option value="" selected>不限</option>
+                        <option value="0-100">0~100元</option>
+                        <option value="100-200">100~200元</option>
+                        <option value="200-300">200~300元</option>
+                        <option value="300-400">300~400元</option>
+                        <option value="400-500">400~500元</option>
+                        <option value="500+">500元以上</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label for="user_id">用户ID（用于旅行记忆）</label>
                     <input type="text" id="user_id" placeholder="默认：test_user" value="test_user">
                 </div>
@@ -726,8 +738,9 @@
                         previewHtml += `<div class="changes-badge"><strong>本次变更：</strong><ul>${changesHtml}</ul></div>`;
                     }
                     previewHtml += renderTripPlan(result.trip_plan);
+                    previewHtml += renderTokenUsage(result.llm_usage);
                     document.getElementById('chatPlanPreview').innerHTML = previewHtml;
-                    document.getElementById('tripPlanContent').innerHTML = renderTripPlan(result.trip_plan);
+                    document.getElementById('tripPlanContent').innerHTML = renderTripPlan(result.trip_plan) + renderTokenUsage(result.llm_usage);
                 } else if (result.changes && result.changes.length > 0) {
                     const changesHtml = result.changes.map(c => `<li>${c}</li>`).join('');
                     document.getElementById('chatPlanPreview').innerHTML =
@@ -776,6 +789,7 @@
                 travel_days: parseInt(document.getElementById('travel_days').value),
                 transportation: document.getElementById('transportation').value,
                 accommodation: document.getElementById('accommodation').value,
+                hotel_budget: document.getElementById('hotel_budget').value,
                 preferences: preferences,
                 free_text_input: document.getElementById('free_text_input').value,
                 user_id: document.getElementById('user_id').value
@@ -803,7 +817,7 @@
                         travel_days: requestData.travel_days,
                     };
 
-                    tripPlanContent.innerHTML = renderTripPlan(result.data);
+                    tripPlanContent.innerHTML = renderTripPlan(result.data) + renderTokenUsage(result.llm_usage);
                     resultSection.classList.add('active');
                     enterChatBar.style.display = 'flex';
 
@@ -845,8 +859,61 @@
             }
         }
 
+        function renderTokenUsage(usage) {
+            if (!usage || !(usage.input_tokens || usage.output_tokens || usage.calls)) {
+                return '';
+            }
+            const missing = usage.calls_without_usage
+                ? `，另有 ${usage.calls_without_usage} 次调用没有返回用量`
+                : '';
+            return `<p class="overall-suggestions">本次模型消耗：输入 ${usage.input_tokens} token，输出 ${usage.output_tokens} token，共 ${usage.calls} 次调用${missing}</p>`;
+        }
+
         function renderTripPlan(data) {
             let html = '';
+
+            if (data.introduction) {
+                html += `
+                    <div class="overall-suggestions">
+                        <h4>旅程介绍</h4>
+                        <p>${data.introduction}</p>
+                    </div>
+                `;
+            }
+
+            if (data.price_checks && data.price_checks.length) {
+                html += `
+                    <div class="overall-suggestions">
+                        <h4>需自行查看实价的景点</h4>
+                        <p>这些景点飞猪没有返回数字票价。预算里用的是知识库参考价，实价请打开链接查看。</p>
+                        ${data.price_checks.map(item => `
+                            <p>
+                                ${item.name}
+                                ${item.reference_price != null ? `，参考票价 ¥${item.reference_price}` : ''}
+                                ${item.jump_url ? `，<a href="${item.jump_url}" target="_blank" rel="noopener">查看飞猪详情</a>` : '，暂无详情链接'}
+                            </p>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            if (data.hotel_options && data.hotel_options.length) {
+                html += `
+                    <div class="overall-suggestions">
+                        <h4>其他可选酒店</h4>
+                        <p>上面每天采用的是规划选定的一家。下面是同一次搜索里其余酒店，可按名称自行更换。</p>
+                        ${data.hotel_options.map(item => `
+                            <p>
+                                ${item.name}
+                                ${item.estimated_cost ? `，每晚约 ¥${item.estimated_cost}` : (item.price_range ? `，${item.price_range}` : '')}
+                                ${item.rating ? `，评分 ${item.rating}` : ''}
+                                ${item.type ? `，${item.type}` : ''}
+                                ${item.address ? `，${item.address}` : ''}
+                            </p>
+                        `).join('')}
+                    </div>
+                `;
+            }
 
             if (data.overall_suggestions) {
                 html += `
@@ -929,6 +996,7 @@
                                         <div class="meal-item">
                                             <strong>${meal.type === 'breakfast' ? '早餐' : meal.type === 'lunch' ? '午餐' : meal.type === 'dinner' ? '晚餐' : '加餐'}</strong>
                                             <span>${meal.name}</span>
+                                            ${meal.address ? `<span>${meal.address}</span>` : ''}
                                             ${meal.estimated_cost ? `<span>¥${meal.estimated_cost}</span>` : ''}
                                         </div>
                                     `).join('')}
@@ -941,6 +1009,7 @@
                                         <h4>${day.hotel.name}</h4>
                                         <p>${day.hotel.address}</p>
                                         ${day.hotel.rating ? `<p>⭐ 评分：${day.hotel.rating}</p>` : ''}
+                                        ${day.hotel.estimated_cost ? `<p>每晚约 ¥${day.hotel.estimated_cost}</p>` : (day.hotel.price_range ? `<p>价格：${day.hotel.price_range}</p>` : '')}
                                     </div>
                                 </div>
                             ` : ''}

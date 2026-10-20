@@ -1147,28 +1147,31 @@ class DialogAgent:
             ChangeType.MODIFY_HOTEL.value,
         )
 
-    def _get_search_agent(self):
-        """对话修改专用：只绑定景点搜索和酒店搜索。"""
-        if getattr(self, "_search_agent", None) is None:
-            from app.agents.react_agent import ReActAgent
-            from app.services.structured_output import SearchResultOutput
-            from app.tools.agent_tools import SmartAttractionTool, RollingGoHotelTool
+    def _build_search_agent(self):
+        """对话修改：景点搜索与推荐 Agent 使用同一个高德工具，酒店仍单独搜索。"""
+        from app.agents.react_agent import ReActAgent
+        from app.agents.recommend import AmapPoolTool
+        from app.services.structured_output import SearchResultOutput
+        from app.tools.agent_tools import RollingGoHotelTool
 
-            self._search_agent = ReActAgent(
-                name="对话检索",
-                tools=[SmartAttractionTool(), RollingGoHotelTool()],
-                llm=self.llm,
-                system_prompt=(
-                    "你负责按用户的修改要求重新搜索景点和酒店，不重写整份行程。\n"
-                    "改景点时调用 smart_attraction_search，参数用计划里的城市和用户要求里的关键词。\n"
-                    "改酒店时调用 hotel_search，带上城市、住宿关键词、入住日期和住宿晚数。\n"
-                    "工具返回后根据结果填写景点名、酒店名和价格，不要编造工具里没有的名称。"
-                ),
-                max_iterations=3,
-                verbose=False,
-                response_format=SearchResultOutput,
-            )
-        return self._search_agent
+        search = getattr(self.amap, "search_poi", None)
+        attraction_tool = AmapPoolTool(search_poi=search, pool=[])
+        agent = ReActAgent(
+            name="对话检索",
+            tools=[attraction_tool, RollingGoHotelTool()],
+            llm=self.llm,
+            system_prompt=(
+                "你负责按用户的修改要求重新搜索景点和酒店，不重写整份行程。\n"
+                "改景点时调用 amap_attraction_search，一次只传一个关键词。\n"
+                "数量不够或类型不符合用户要求时，换一个关键词再搜。\n"
+                "改酒店时调用 hotel_search，带上城市、住宿关键词、入住日期和住宿晚数。\n"
+                "attractions 和 hotel 只能填写对应工具返回过的原名，不要编造。"
+            ),
+            max_iterations=6,
+            verbose=False,
+            response_format=SearchResultOutput,
+        )
+        return agent, attraction_tool
 
     def _research_for_modification(
         self,
@@ -1198,7 +1201,8 @@ class DialogAgent:
             f"用户要求：{user_input}"
         )
         try:
-            text = self._get_search_agent().run(query)
+            agent, attraction_tool = self._build_search_agent()
+            text = agent.run(query)
         except Exception as e:
             print(f"对话检索失败: {e}")
             return
@@ -1208,6 +1212,16 @@ class DialogAgent:
         attractions = parsed.get("attractions") or []
         if isinstance(attractions, str):
             attractions = [attractions]
+        found = []
+        seen = set()
+        for item in attraction_tool.pool:
+            name = str(item.get("name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                found.append(name)
+        attractions = [str(name).strip() for name in attractions if str(name).strip() in seen]
+        if not attractions:
+            attractions = found
         price = parsed.get("hotel_price")
         try:
             price = float(price) if price not in (None, "") else None
@@ -1687,7 +1701,7 @@ class DialogAgent:
         transportation: str,
         used: set = None,
     ) -> None:
-        """按第一轮同一套规则重算当天路程、用餐和时间，空档补到 21:00。"""
+        """按第一轮同一套规则重算当天路程、用餐和时间，空档补到 20:00，超过 20:00 可以。"""
         if not isinstance(day, dict):
             return
         helper = self._schedule_helper()
@@ -1759,7 +1773,7 @@ class DialogAgent:
             # 更新预算
             budget = plan.get("budget", {})
             if isinstance(budget, dict):
-                meal_per_day = 180
+                meal_per_day = 120
                 transport_per_day = 50
                 delta_days = new_days - old_days
                 budget["total_meals"] = budget.get("total_meals", 0) + meal_per_day * delta_days

@@ -4,6 +4,7 @@
 """
 
 from .metrics import PerformanceMetrics, get_metrics, Timer
+from .token_usage import track_llm_usage, usage_from_result
 from .logger import AgentLogger, get_logger
 from .alert import AlertManager, AlertRule, get_alert_manager, setup_default_alerts
 from .langsmith_tracer import (
@@ -22,6 +23,8 @@ __all__ = [
     "PerformanceMetrics",
     "get_metrics",
     "Timer",
+    "track_llm_usage",
+    "usage_from_result",
     "AgentLogger",
     "get_logger",
     "AlertManager",

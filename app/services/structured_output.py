@@ -135,9 +135,14 @@ class AttractionOutput(BaseModel):
     address: str = ""
     location: Optional[GeoPoint] = None
     visit_duration: int = 120
-    description: str = ""
+    description: str = Field(default="", max_length=40)
     category: str = ""
     ticket_price: int = 0
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _clip_description(cls, value: Any) -> str:
+        return str(value or "")[:40]
 
     @field_validator("location", mode="before")
     @classmethod
@@ -161,8 +166,36 @@ class MealOutput(BaseModel):
 
     type: str = ""
     name: str = ""
-    description: str = ""
+    address: str = ""
+    location: Optional[GeoPoint] = None
+    description: str = Field(default="", max_length=40)
     estimated_cost: int = 0
+    duration_minutes: int = 60
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _clip_description(cls, value: Any) -> str:
+        return str(value or "")[:40]
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def _location(cls, value: Any) -> Any:
+        if isinstance(value, str) and "," in value:
+            lon, lat = value.split(",", 1)
+            return {"longitude": lon, "latitude": lat}
+        if isinstance(value, dict) and ("longitude" in value or "latitude" in value):
+            lon = value.get("longitude")
+            lat = value.get("latitude")
+            if lon in (None, "", 0, 0.0) or lat in (None, "", 0, 0.0):
+                return None
+            return value
+        return None
+
+    @field_validator("duration_minutes", mode="before")
+    @classmethod
+    def _duration(cls, value: Any) -> int:
+        minutes = _as_int(value)
+        return minutes if minutes > 0 else 60
 
     @field_validator("estimated_cost", mode="before")
     @classmethod
@@ -243,12 +276,17 @@ class DayOutput(BaseModel):
 
     date: str = ""
     day_index: int = 0
-    description: str = ""
+    description: str = Field(default="", max_length=40)
     transportation: str = ""
     accommodation: str = ""
     hotel: Optional[HotelOutput] = None
     attractions: List[AttractionOutput] = Field(default_factory=list)
     meals: List[MealOutput] = Field(default_factory=list)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _clip_description(cls, value: Any) -> str:
+        return str(value or "")[:40]
 
     @field_validator("day_index", mode="before")
     @classmethod
@@ -276,6 +314,25 @@ class DayOutput(BaseModel):
         return value
 
 
+class AttractionPickOutput(BaseModel):
+    """从高德名单里点名。names 是景点，lunch / dinner 是餐馆原名。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    names: List[str] = Field(default_factory=list)
+    lunch: List[str] = Field(default_factory=list)
+    dinner: List[str] = Field(default_factory=list)
+
+    @field_validator("names", "lunch", "dinner", mode="before")
+    @classmethod
+    def _names(cls, value: Any) -> List[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+
 class TripPlanOutput(BaseModel):
     """主图规划节点的行程 JSON。"""
 
@@ -284,10 +341,17 @@ class TripPlanOutput(BaseModel):
     city: str = ""
     start_date: str = ""
     end_date: str = ""
+    introduction: str = Field(default="", max_length=360)
     days: List[DayOutput] = Field(default_factory=list)
     weather_info: List[WeatherOutput] = Field(default_factory=list)
-    overall_suggestions: str = ""
+    overall_suggestions: str = Field(default="", max_length=160)
     budget: Optional[BudgetOutput] = None
+
+    @field_validator("introduction", "overall_suggestions", mode="before")
+    @classmethod
+    def _clip_prose(cls, value: Any, info) -> str:
+        limit = 360 if info.field_name == "introduction" else 160
+        return str(value or "")[:limit]
 
     @field_validator("budget", mode="before")
     @classmethod
@@ -376,6 +440,29 @@ class FillNameOutput(BaseModel):
     @classmethod
     def _name(cls, value: Any) -> str:
         return str(value or "").strip()
+
+
+class PlanReflectOutput(BaseModel):
+    """根据已排时间表判断这一轮是否达标。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    passed: bool = False
+    note: str = ""
+
+    @field_validator("passed", mode="before")
+    @classmethod
+    def _passed(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "是", "达标", "通过"}
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def _note(cls, value: Any) -> str:
+        return str(value or "").strip()[:200]
 
 
 def message_text(content: Any) -> str:

@@ -2,8 +2,8 @@
 上海完整链路手工测试（和 Web /api/trip/plan 同一条 LangGraph 主路径）
 
 链路：
-  知识库检索 → 长期记忆查询 → 景点/天气/酒店并行子图
-  → 路线 → 生成行程 → 反思 → 写入 Chroma 长期记忆
+  init → memory → 景点推荐 / 天气 / 酒店并行
+  → 排好每一天后计算距离 → 反思 → 写入 Chroma 长期记忆
   → Redis 计划版本 → DialogAgent 改计划（滑动窗口）→ 回退
 
 用法（项目根目录，会打真实 LLM / Embedding / 高德，大约数分钟）:
@@ -119,7 +119,7 @@ def step_knowledge_base() -> bool:
 
 def step_plan(days: int, start: str, end: str) -> tuple[bool, dict]:
     _banner("2) LangGraph 主图规划（并行景点/天气/酒店）")
-    from app.agents.langgraph_builder import get_langgraph_agent
+    from app.orchestrator import get_langgraph_agent
 
     print("  正在初始化 Agent（LLM + Chroma + 高德）...")
     t0 = time.time()
@@ -202,7 +202,7 @@ def step_long_term_memory(plan_names: list[str]) -> bool:
 
 def step_query_memory_node() -> bool:
     _banner("4) 再次进入 query_memory（应避开已游）")
-    from app.agents.langgraph_builder import get_langgraph_agent
+    from app.orchestrator import get_langgraph_agent
 
     agent = get_langgraph_agent(llm_provider="aliyun")
     result = agent.nodes.query_memory({"user_id": USER_ID, "city": CITY})

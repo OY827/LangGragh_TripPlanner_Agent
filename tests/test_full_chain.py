@@ -3,7 +3,7 @@
 
 链路和 Web 一致：
   知识库检索 → LangGraph 主图（景点 / 天气 / 酒店并行）
-  → 生成行程 → 按完整游览分钟排到 21:00，高德路程加 10 分钟缓冲，空档用知识库景点补上
+  → 生成行程 → 按完整游览分钟排程，收尾达到或超过 20:00 即算晚上排满，高德路程加 10 分钟缓冲，空档用候选景点补上
   → 对话把一个景点换成上海迪士尼（重排当天时间并重算路程）
   → 对话换成带每晚价格的酒店
 
@@ -11,12 +11,17 @@
     .\\.venv\\Scripts\\python.exe tests/test_full_chain.py
     .\\.venv\\Scripts\\python.exe tests/test_full_chain.py --days 2
     .\\.venv\\Scripts\\python.exe tests/test_full_chain.py --skip-dialog
+
+本机 Redis 没启动时，会用 Docker 拉起名为 trip-planner-redis 的容器。
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -35,6 +40,7 @@ except ImportError:
 os.environ.setdefault("VECTOR_BACKEND", "chroma")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
+REDIS_CONTAINER = "trip-planner-redis"
 USER_ID = "shanghai_full_chain_user"
 CITY = "上海"
 PREFERENCES = ["夜景", "步行街"]
@@ -108,12 +114,23 @@ def _print_days(days: list) -> None:
             print("    (没有时间表)")
 
 
+def _minutes(value) -> int:
+    text = str(value or "")
+    if ":" not in text:
+        return -1
+    hour, minute = text.split(":", 1)
+    try:
+        return int(hour) * 60 + int(minute[:2])
+    except ValueError:
+        return -1
+
+
 def _schedule_checks(days: list, label: str) -> bool:
+    """收尾达到或超过 20:00 即算晚上排满。"""
     has_slot = False
-    within_close = True
     reached_close = False
     routes_ok = True
-    late_detail = ""
+    evening_start = 20 * 60
     for day in days:
         if not isinstance(day, dict):
             continue
@@ -122,25 +139,99 @@ def _schedule_checks(days: list, label: str) -> bool:
         slots = day.get("time_slots") or []
         if slots:
             has_slot = True
-            end = _hour(slots[-1].get("end_time"))
-            if end > 21:
-                within_close = False
-                late_detail = slots[-1].get("end_time")
-            if end == 21:
+            end = _minutes(slots[-1].get("end_time"))
+            if end >= evening_start:
                 reached_close = True
-            for slot in slots:
-                if _hour(slot.get("end_time")) > 21:
-                    within_close = False
-                    late_detail = slot.get("end_time")
         if len(names) > 1 and not day.get("route_segments"):
             routes_ok = False
     checks = [
         _ok(f"{label} 有时间表", has_slot),
-        _ok(f"{label} 没有晚于 21:00 的时段", within_close, late_detail),
-        _ok(f"{label} 至少有一天排到 21:00", reached_close),
+        _ok(f"{label} 至少有一天收尾达到或超过 20:00", reached_close),
         _ok(f"{label} 多个景点的那天有路程", routes_ok),
     ]
     return all(checks)
+
+
+def _redis_target() -> tuple[str, int, str]:
+    host = os.getenv("REDIS_HOST", "localhost") or "localhost"
+    port = int(os.getenv("REDIS_PORT", "6379") or "6379")
+    password = os.getenv("REDIS_PASSWORD", "") or ""
+    return host, port, password
+
+
+def _redis_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _local_redis(host: str) -> bool:
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def redis_run_command(port: int, password: str) -> list[str]:
+    command = [
+        "docker", "run", "-d",
+        "--name", REDIS_CONTAINER,
+        "-p", f"{port}:6379",
+        "redis:7",
+    ]
+    if password:
+        command.extend(["redis-server", "--requirepass", password])
+    return command
+
+
+def ensure_redis(run=None) -> str:
+    """本机没有 Redis 时，用 Docker 启动 trip-planner-redis。"""
+    host, port, password = _redis_target()
+    if _redis_reachable(host, port):
+        print(f"  Redis 已在 {host}:{port}")
+        return "already_running"
+    if not _local_redis(host):
+        print(f"  Redis {host}:{port} 不可达，主机不是本机，不启动 Docker")
+        return "remote_unreachable"
+    if shutil.which("docker") is None:
+        print("  未找到 docker，Redis 将回退到内存或文件")
+        return "docker_missing"
+
+    execute = run or subprocess.run
+    existing = execute(
+        ["docker", "ps", "-aq", "--filter", f"name=^{REDIS_CONTAINER}$"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if existing.returncode == 0 and (existing.stdout or "").strip():
+        print(f"  启动已有容器 {REDIS_CONTAINER}")
+        started = execute(
+            ["docker", "start", REDIS_CONTAINER],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    else:
+        print(f"  本机 Redis 未启动，使用 Docker 创建 {REDIS_CONTAINER}")
+        started = execute(
+            redis_run_command(port, password),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    if started.returncode != 0:
+        detail = (started.stderr or started.stdout or "").strip()
+        print(f"  Docker 启动 Redis 失败: {detail}")
+        return "docker_failed"
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if _redis_reachable(host, port):
+            print(f"  Redis 已通过 Docker 就绪: {host}:{port}")
+            return "started"
+        time.sleep(1)
+    print(f"  容器已创建，但 {host}:{port} 在 30 秒内没有接受连接")
+    return "not_ready"
 
 
 def step_preflight(days: int, start: str, end: str) -> None:
@@ -151,12 +242,14 @@ def step_preflight(days: int, start: str, end: str) -> None:
     print(f"  DASHSCOPE_MODEL={os.getenv('DASHSCOPE_MODEL') or '(默认)'}")
     print(f"  AMAP_MAPS_API_KEY={'已配置' if os.getenv('AMAP_MAPS_API_KEY') else '缺失'}")
     print(f"  HOTEL_API_KEY={'已配置' if os.getenv('HOTEL_API_KEY') else '缺失'}")
-    print(f"  REDIS={os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', '6379')}")
+    host, port, _password = _redis_target()
+    print(f"  REDIS={host}:{port}")
+    ensure_redis()
 
 
 def step_plan(days: int, start: str, end: str) -> tuple[bool, dict]:
     _banner("1) LangGraph 规划（景点 / 天气 / 酒店 → 时间表和路程）")
-    from app.agents.langgraph_builder import get_langgraph_agent
+    from app.orchestrator import get_langgraph_agent
 
     print("  正在初始化 Agent ...")
     t0 = time.time()

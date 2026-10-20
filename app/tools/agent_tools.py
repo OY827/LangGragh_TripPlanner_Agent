@@ -588,6 +588,7 @@ def get_all_tools() -> list:
         DateTimeTool(),
         WeatherTool(),
         AmapAttractionTool(),
+        FlyaiTicketSearchTool(),
         AmapWeatherTool(),
         RollingGoHotelTool(),
         AmapHotelTool(),
@@ -623,6 +624,11 @@ def get_route_tools() -> list:
 class SmartAttractionSearchInput(BaseModel):
     city: str = Field(..., description="城市名称")
     keywords: str = Field(default="", description="搜索关键词，如历史文化、自然风光等")
+
+
+class FlyaiTicketSearchInput(BaseModel):
+    scenic_name: str = Field(..., description="景点名称，如外滩、中山陵")
+    city: str = Field(..., description="城市中文全称，如上海")
 
 
 _retriever_instance = None
@@ -730,71 +736,35 @@ def _get_hybrid_rag():
 
 
 class SmartAttractionTool(BaseTool):
-    """
-    智能景点搜索工具
-    优先 HybridRAG + BGE Rerank 从知识库精排，再用高德补充坐标/地址。
-    """
+    """高德拉名单，知识库补简介，飞猪补门票。"""
+
     name: str = "smart_attraction_search"
     description: str = (
-        "智能搜索景点（优先使用）：知识库 HybridRAG+BGE Rerank 精排，"
-        "再用高德补充坐标与地址，含建议游览时长等字段。"
+        "搜索景点：高德返回名称、地址和坐标，按关键词筛选并保留足够数量，"
+        "知识库补简介和游览时长，飞猪补门票价格。"
     )
     args_schema: type = SmartAttractionSearchInput
 
     def _run(self, city: str, keywords: str = "") -> str:
         try:
-            kb_results, meta = self._search_hybrid_rag(city, keywords)
-            amap_results = self._search_amap(city, keywords)
-            amap_by_name = self._index_amap_pois(amap_results)
+            from app.services.amap_service import get_amap_service
+            from app.services.attraction_recommend import build_recommendation
 
-            if not kb_results and not amap_results:
+            service = get_amap_service()
+            if service is None:
                 return f"无法获取{city}的景点信息"
-
-            # 知识库精排结果优先；高德用于补坐标
-            lines = []
-            used_names = set()
-            rerank_enabled = meta.get("rerank_enabled", False)
-
-            for idx, doc in enumerate(kb_results[:12], 1):
-                metadata = doc.get("metadata", {}) or {}
-                name = (metadata.get("title") or "").strip()
-                if not name:
-                    continue
-                used_names.add(name)
-                poi = self._match_amap_poi(name, amap_by_name)
-                info = f"{idx}. {name}"
-                if rerank_enabled and doc.get("rerank_score") is not None:
-                    info += f" (相关性: {float(doc['rerank_score']):.2f})"
-                info = _append_attraction_fields(info, metadata, poi)
-                lines.append(info)
-
-            # 高德独有景点作为补充（不打乱 KB 排序）
-            extras = []
-            for poi in amap_results:
-                name = (poi.get("name") or "").strip()
-                if not name or self._name_matched(name, used_names):
-                    continue
-                extras.append(poi)
-
-            if extras:
-                lines.append("\n" + "=" * 50)
-                lines.append("高德补充景点（坐标/地址参考）：")
-                lines.append("=" * 50)
-                start = len([x for x in lines if x and x[0].isdigit()]) + 1
-                for i, poi in enumerate(extras[:6], start):
-                    name = poi.get("name", "").strip()
-                    info = f"{i}. {name}"
-                    info = _append_attraction_fields(info, {}, poi)
-                    lines.append(info)
-
-            footer = ""
-            if rerank_enabled:
-                mode = (meta.get("rerank_info") or {}).get("mode", "bge")
-                footer = f"\n\n[检索模式: Hybrid+Rerank({mode}), 知识库精排{len(kb_results)}条]"
-            elif kb_results:
-                footer = f"\n\n[检索模式: HybridRAG, 知识库{len(kb_results)}条]"
-
-            return "\n\n".join(lines) + footer
+            preferences = [keywords] if keywords else []
+            payload = build_recommendation(
+                search_poi=service.search_poi,
+                city=city,
+                query=keywords or f"{city}景点",
+                preferences=preferences,
+                travel_days=3,
+            )
+            text = payload.get("text") or ""
+            if not text:
+                return f"无法获取{city}的景点信息"
+            return text
         except Exception as e:
             return f"智能景点搜索出错：{str(e)}"
 
@@ -952,12 +922,41 @@ class RAGAttractionTool(BaseTool):
         return self._run(city, keywords)
 
 
+class FlyaiTicketSearchTool(BaseTool):
+    """飞猪 search-poi：按城市和景点名查门票。"""
+
+    name: str = "flyai_ticket_search"
+    description: str = (
+        "用飞猪查询景点门票。必填 city 和 scenic_name。"
+        "返回票名、价格和详情链接。没有数字价格时以详情页为准。"
+    )
+    args_schema: type = FlyaiTicketSearchInput
+
+    def _run(self, scenic_name: str, city: str) -> str:
+        if not (scenic_name or "").strip():
+            return "错误：缺少景点名称"
+        if not (city or "").strip():
+            return "错误：缺少城市"
+        try:
+            from app.services.flyai_ticket_service import get_flyai_ticket_service
+
+            service = get_flyai_ticket_service()
+            if not service.is_configured():
+                return "飞猪景点搜索失败：未配置 FLYAI_API_KEY"
+            return service.search_and_format(city=city, scenic_name=scenic_name)
+        except Exception as e:
+            return f"飞猪景点搜索出错：{str(e)}"
+
+    async def _arun(self, scenic_name: str, city: str) -> str:
+        return self._run(scenic_name, city)
+
+
 def get_attraction_tools() -> list:
     """获取景点搜索相关工具"""
     return [
         AmapAttractionTool(),
-        RAGAttractionTool(),
         SmartAttractionTool(),
+        FlyaiTicketSearchTool(),
     ]
 
 

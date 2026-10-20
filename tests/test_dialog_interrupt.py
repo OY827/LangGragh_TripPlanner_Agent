@@ -6,7 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 
-from app.agents.langgraph_builder import LangGraphBuilder, read_interrupt
+from app.orchestrator import LangGraphBuilder, read_interrupt
 
 
 class _State(TypedDict, total=False):
@@ -28,7 +28,7 @@ def _route(state):
 
 
 def test_redis_url_uses_the_same_host_port_and_password():
-    from app.agents.langgraph_builder import build_redis_url
+    from app.orchestrator import build_redis_url
 
     assert build_redis_url("127.0.0.1", 6379, "") == "redis://127.0.0.1:6379/0"
     assert build_redis_url("127.0.0.1", 6380, "a/b") == "redis://:a%2Fb@127.0.0.1:6380/0"

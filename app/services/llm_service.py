@@ -29,10 +29,13 @@ def get_openai_llm(temperature: float = 0.7, model: str = "gpt-4") -> ChatOpenAI
     if not api_key:
         raise ValueError("OPENAI_API_KEY is not set in environment variables")
 
+    from app.monitoring.token_usage import token_usage_handler
+
     return ChatOpenAI(
         api_key=api_key,
         model=model,
-        temperature=temperature
+        temperature=temperature,
+        callbacks=[token_usage_handler()],
     )
 
 
@@ -57,12 +60,20 @@ def get_aliyun_llm(temperature: float = 0.7, model: str = None) -> ChatOpenAI:
     if model is None:
         model = os.getenv("DASHSCOPE_MODEL", "qwen-turbo")
 
-    # 使用 OpenAI 兼容模式调用阿里云 DashScope
+    from app.monitoring.token_usage import token_usage_handler
+
+    # 使用 OpenAI 兼容模式调用阿里云 DashScope。
+    # qwen3 默认会把思考过程算进 completion，规划一次能写到两万 token。
+    extra_body = {"enable_thinking": False} if "qwen3" in model.lower() else None
     return ChatOpenAI(
         api_key=api_key,
         model=model,
         temperature=temperature,
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        timeout=180,
+        max_tokens=4096,
+        extra_body=extra_body,
+        callbacks=[token_usage_handler()],
     )
 
 

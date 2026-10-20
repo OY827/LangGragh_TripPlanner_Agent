@@ -96,6 +96,44 @@ def test_trip_plan_coerces_messy_fields():
     assert plan.budget.total == 2060
 
 
+def test_trip_plan_clips_long_prose():
+    plan = TripPlanOutput.model_validate({
+        "introduction": "上海" * 500,
+        "overall_suggestions": "建议" * 200,
+        "days": [{
+            "description": "这一天非常充实" * 20,
+            "attractions": [{"name": "外滩", "description": "外滩夜景" * 30}],
+        }],
+    })
+    assert len(plan.introduction) == 360
+    assert len(plan.overall_suggestions) == 160
+    assert len(plan.days[0].description) == 40
+    assert len(plan.days[0].attractions[0].description) == 40
+
+
+def test_candidate_facts_replace_model_prose():
+    from app.agents.planner import PlannerMixin
+
+    parsed = {
+        "introduction": "短介绍",
+        "days": [{
+            "attractions": [{"name": "外滩", "description": "模型写了一大段", "visit_duration": 10}],
+        }],
+    }
+    PlannerMixin._apply_candidate_facts(None, parsed, [{
+        "name": "外滩",
+        "address": "中山东一路",
+        "location": "121.49,31.24",
+        "visit_duration": 90,
+        "description": "外滩夜景",
+        "ticket_price": 0,
+    }])
+    attraction = parsed["days"][0]["attractions"][0]
+    assert attraction["visit_duration"] == 90
+    assert attraction["location"] == "121.49,31.24"
+    assert attraction["description"] == "外滩夜景"
+
+
 def test_answer_check_accepts_string_bool():
     check = AnswerCheck.model_validate({
         "grounded": "false",

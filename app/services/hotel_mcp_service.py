@@ -24,6 +24,16 @@ _STAR_HINTS = [
     (["三星", "3星", "经济", "快捷", "民宿"], [3.0, 2.0]),
 ]
 
+# 每晚价格区间。边界落在较低一档：100 元属于 0~100，500 元属于 400~500。
+HOTEL_BUDGETS = {
+    "0-100": (0, 100, "0~100元"),
+    "100-200": (100, 200, "100~200元"),
+    "200-300": (200, 300, "200~300元"),
+    "300-400": (300, 400, "300~400元"),
+    "400-500": (400, 500, "400~500元"),
+    "500+": (500, None, "500元以上"),
+}
+
 
 class HotelMCPService:
     """RollingGo 酒店搜索封装（单例）。"""
@@ -136,11 +146,98 @@ class HotelMCPService:
 
         return sorted(hotels, key=sort_key)
 
-    def format_for_agent(self, hotels: List[Dict[str, Any]], city: str = "") -> str:
+    @classmethod
+    def budget_label(cls, budget: str) -> str:
+        item = HOTEL_BUDGETS.get((budget or "").strip())
+        return item[2] if item else ""
+
+    @classmethod
+    def nightly_price(cls, hotel: Dict[str, Any]) -> Optional[float]:
+        text = cls._format_price(hotel)
+        if not text:
+            return None
+        match = re.search(r"\d+(?:\.\d+)?", text.replace(",", ""))
+        if not match:
+            return None
+        return float(match.group(0))
+
+    @classmethod
+    def filter_by_budget(cls, hotels: List[Dict[str, Any]], budget: str) -> List[Dict[str, Any]]:
+        """只保留每晚价格落在区间内的酒店。没有报价的酒店无法判断，不进入候选。"""
+        item = HOTEL_BUDGETS.get((budget or "").strip())
+        if not item:
+            return hotels
+        low, high, _label = item
+        kept = []
+        for hotel in hotels:
+            price = cls.nightly_price(hotel)
+            if price is None:
+                continue
+            if low == 0:
+                if high is not None and 0 <= price <= high:
+                    kept.append(hotel)
+                continue
+            if price <= low:
+                continue
+            if high is not None and price > high:
+                continue
+            kept.append(hotel)
+        return kept
+
+    @classmethod
+    def as_option(cls, hotel: Dict[str, Any]) -> Dict[str, Any]:
+        """收成计划里可展示的一家酒店。"""
+        price = cls.nightly_price(hotel)
+        address = cls._pick(hotel, "address", "hotelAddress", "addr")
+        if not isinstance(address, str):
+            address = ""
+        star = cls._pick(hotel, "star", "starRating", "stars", "hotelStar")
+        hotel_type = cls._pick(hotel, "type", "category", "hotelType")
+        rating = cls._pick(hotel, "rating", "score", "commentScore", "reviewScore")
+        distance = cls._pick(hotel, "distance", "distanceDesc", "distanceText")
+        return {
+            "name": str(cls._pick(hotel, "name", "hotelName", "hotel_name", "title") or "未知酒店"),
+            "address": address,
+            "price_range": cls._format_price(hotel),
+            "rating": "" if rating is None else str(rating),
+            "distance": "" if not isinstance(distance, str) else distance,
+            "type": str(star or hotel_type or ""),
+            "estimated_cost": int(round(price)) if price is not None else 0,
+        }
+
+    @staticmethod
+    def same_hotel(chosen: str, name: str) -> bool:
+        left = str(chosen or "").strip()
+        right = str(name or "").strip()
+        if not left or not right:
+            return False
+        return left == right or left in right or right in left
+
+    @classmethod
+    def remaining_options(cls, chosen_name: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """去掉规划模型选中的那一家，留下给用户自己挑的候选。"""
+        return [
+            item for item in candidates
+            if isinstance(item, dict) and not cls.same_hotel(chosen_name, item.get("name") or "")
+        ]
+
+    def format_for_agent(
+        self,
+        hotels: List[Dict[str, Any]],
+        city: str = "",
+        budget: str = "",
+    ) -> str:
+        label = self.budget_label(budget)
         if not hotels:
+            if label:
+                where = f"{city}" if city else ""
+                return f"未找到{where}每晚 {label} 的酒店"
             return f"未找到{city}符合条件的酒店" if city else "未找到符合条件的酒店"
 
-        lines = [f"共找到 {len(hotels)} 家酒店（RollingGo 实时报价）：", ""]
+        title = f"共找到 {len(hotels)} 家酒店（RollingGo 实时报价"
+        if label:
+            title += f"，每晚 {label}"
+        lines = [title + "）：", ""]
         for i, hotel in enumerate(hotels, 1):
             name = self._pick(hotel, "name", "hotelName", "hotel_name", "title") or "未知酒店"
             lines.append(f"{i}. {name}")

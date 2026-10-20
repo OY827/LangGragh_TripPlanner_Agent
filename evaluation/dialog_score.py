@@ -6,8 +6,8 @@ from evaluation.metrics import rate
 
 TOOL_REQUIRED = {"add_item", "modify_attractions", "modify_hotel"}
 TOOL_BY_TYPE = {
-    "add_item": "smart_attraction_search",
-    "modify_attractions": "smart_attraction_search",
+    "add_item": "amap_attraction_search",
+    "modify_attractions": "amap_attraction_search",
     "modify_hotel": "hotel_search",
 }
 

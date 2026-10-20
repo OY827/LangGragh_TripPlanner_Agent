@@ -5,6 +5,7 @@ from evaluation.latency_score import summarize_latency
 from evaluation.plan_score import score_plans
 from evaluation.rag_score import score_retrievals
 from evaluation.report import build_report
+from evaluation.task_pass import format_pass_report, score_task_suite
 
 __all__ = [
     "score_plans",
@@ -12,4 +13,6 @@ __all__ = [
     "summarize_latency",
     "score_retrievals",
     "build_report",
+    "score_task_suite",
+    "format_pass_report",
 ]

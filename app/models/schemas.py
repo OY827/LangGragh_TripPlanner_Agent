@@ -329,15 +329,25 @@ class DayPlan(BaseModel):
     route_segments: List[RouteSegment] = Field(default=[], description="路线段列表")
 
 
+class TicketPriceCheck(BaseModel):
+    """飞猪未返回实价、需要用户打开详情页核对的景点。"""
+    name: str = Field(..., description="景点名称")
+    reference_price: Optional[int] = Field(default=None, description="知识库静态参考票价")
+    jump_url: str = Field(default="", description="飞猪详情链接")
+
+
 class TripPlan(BaseModel):
     """旅行计划"""
     city: str = Field(..., description="目的地城市")
     start_date: str = Field(..., description="开始日期")
     end_date: str = Field(..., description="结束日期")
+    introduction: str = Field(default="", description="这一趟旅程的介绍")
     days: List[DayPlan] = Field(default=[], description="每日行程")
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(default="", description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+    price_checks: List[TicketPriceCheck] = Field(default_factory=list, description="需用户自行查看实价的景点")
+    hotel_options: List[Hotel] = Field(default_factory=list, description="规划未选中、可供用户自行选择的酒店")
 
     def normalize_day_indices(self) -> "TripPlan":
         """将 day_index 统一为从 0 开始，与 days 数组顺序一致"""
@@ -363,6 +373,10 @@ class TripRequest(BaseModel):
     travel_days: int = Field(..., description="旅行天数", ge=1, le=30, example=3)
     transportation: str = Field(default="公共交通", description="交通方式")
     accommodation: str = Field(default="经济型酒店", description="住宿偏好")
+    hotel_budget: str = Field(
+        default="",
+        description="每晚预算区间：0-100、100-200、200-300、300-400、400-500、500+，空表示不限",
+    )
     preferences: List[str] = Field(default_factory=list, description="旅行偏好标签")
     free_text_input: Optional[str] = Field(default="", description="额外要求")
     user_id: Optional[str] = Field(default="default_user", description="用户ID，用于旅行记忆")
@@ -409,6 +423,7 @@ class TripPlanResponse(BaseModel):
     thread_id: Optional[str] = Field(default=None, description="主图会话，恢复对话时传回")
     session_id: Optional[str] = Field(default=None, description="版本管理会话ID")
     welcome_message: Optional[str] = Field(default=None, description="暂停时展示的引导语")
+    llm_usage: Optional[dict] = Field(default=None, description="本次规划的模型 token 用量")
 
 
 class DialogSessionRequest(BaseModel):
@@ -442,6 +457,7 @@ class DialogChatResponse(BaseModel):
     trip_plan: Optional[TripPlan] = Field(default=None, description="更新后的旅行计划（用于前端展示）")
     changes: List[str] = Field(default_factory=list, description="变更描述")
     new_version_id: Optional[str] = Field(default=None, description="新版本ID")
+    llm_usage: Optional[dict] = Field(default=None, description="本次对话的模型 token 用量")
 
 
 class POISearchResponse(BaseModel):

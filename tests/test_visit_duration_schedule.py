@@ -100,8 +100,39 @@ def test_short_day_is_filled_until_21():
     }
     used = {"南京路步行街", "上海迪士尼度假区"}
     nodes._fill_day_until_close(day, "上海", "公共交通", used)
-    assert nodes._day_end_hour(day) == 21
+    assert len([item for item in day["attractions"] if item.get("name")]) <= 6
     assert any(item["name"].startswith("补点") for item in day["attractions"])
+    assert all(slot["end_time"] <= "21:00" for slot in day["time_slots"])
+
+
+def test_pool_filler_uses_unused_candidates_without_another_search():
+    nodes = GraphNodes.__new__(GraphNodes)
+    nodes.logger = None
+
+    def suggest(*_args, **_kwargs):
+        raise AssertionError("候选池还有景点时不再搜索")
+
+    nodes._suggest_filler_attraction = suggest
+    day = {
+        "day_index": 0,
+        "attractions": [{"name": "外滩", "visit_duration": 90}],
+        "meals": [
+            {"type": "lunch", "name": "午饭", "duration_minutes": 60},
+            {"type": "dinner", "name": "晚饭", "duration_minutes": 60},
+        ],
+    }
+    pool = [
+        {"name": "外滩", "visit_duration": 90},
+        {"name": "排不下", "visit_duration": 180, "open_time": "09:00-10:00"},
+        {"name": "豫园", "visit_duration": 90},
+        {"name": "人民广场", "visit_duration": 90},
+        {"name": "新天地", "visit_duration": 90},
+        {"name": "武康路", "visit_duration": 90},
+    ]
+    nodes._fill_day_until_close(day, "上海", "公共交通", {"外滩"}, pool)
+    names = [item["name"] for item in day["attractions"]]
+    assert "豫园" in names
+    assert len(names) >= 4
     assert all(slot["end_time"] <= "21:00" for slot in day["time_slots"])
 
 
@@ -175,8 +206,9 @@ def test_short_distance_is_walk_and_failed_route_is_not_a_bus():
     assert chain["duration"] == 78
 
     unknown = GraphNodes._qualify_route_leg(0, 0, [], "公共交通", "transit")
-    assert unknown["duration"] == 30
-    assert "未取得" in unknown["route_detail"]
+    assert unknown["duration"] == 5
+    assert unknown["transport_mode"] == "步行"
+    assert "步行" in unknown["route_detail"]
 
 
 def test_nearest_neighbor_orders_from_hotel():
@@ -230,21 +262,49 @@ def test_lunch_is_inserted_between_attractions():
     nodes = _nodes_with_fixed_route(10)
     day = {
         "day_index": 0,
+        "meals": [
+            {"type": "lunch", "name": "南翔馒头店", "address": "豫园路"},
+            {"type": "dinner", "name": "老正兴", "address": "福州路"},
+        ],
         "attractions": [
             {"name": "上午街", "visit_duration": 150},
             {"name": "小店", "visit_duration": 30},
         ],
     }
     nodes._schedule_day_clock(day, "上海", "公共交通")
-    lunch = next(slot for slot in day["time_slots"] if slot["activity_name"] == "午餐")
+    lunch = next(slot for slot in day["time_slots"] if slot["activity_name"] == "南翔馒头店")
     shop = next(slot for slot in day["time_slots"] if slot["activity_name"] == "小店")
     assert lunch["start_time"] == "11:30"
     assert lunch["end_time"] == "12:30"
+    assert lunch["description"] == "豫园路"
     assert shop["start_time"] == "12:50"
     assert shop["end_time"] == "13:20"
+    assert all(slot["activity_name"] != "早餐" for slot in day["time_slots"])
 
 
-def test_long_visit_keeps_lunch_inside():
+def test_located_lunch_is_a_stop_on_the_path():
+    nodes = _nodes_with_fixed_route(10)
+    day = {
+        "day_index": 0,
+        "meals": [
+            {"type": "lunch", "name": "南翔馒头店", "address": "豫园路", "location": "121.49,31.22"},
+        ],
+        "attractions": [
+            {"name": "上午街", "visit_duration": 150, "location": "121.48,31.23"},
+            {"name": "小店", "visit_duration": 30, "location": "121.49,31.23"},
+        ],
+    }
+    nodes._schedule_day_clock(day, "上海", "公共交通")
+    lunch = next(slot for slot in day["time_slots"] if slot["activity_name"] == "南翔馒头店")
+    shop = next(slot for slot in day["time_slots"] if slot["activity_name"] == "小店")
+    assert lunch["start_time"] == "11:50"
+    assert lunch["end_time"] == "12:50"
+    assert shop["start_time"] == "13:10"
+    assert shop["end_time"] == "13:40"
+    assert [seg["end_point"] for seg in day["route_segments"]] == ["南翔馒头店", "小店"]
+
+
+def test_long_visit_still_gets_meals_around_it():
     nodes = _nodes_with_fixed_route(10)
     day = {
         "day_index": 0,
@@ -255,7 +315,58 @@ def test_long_visit_keeps_lunch_inside():
     nodes._schedule_day_clock(day, "上海", "公共交通")
     assert day["time_slots"][0]["start_time"] == "09:00"
     assert day["time_slots"][0]["end_time"] == "13:00"
-    assert all(slot["activity_name"] != "午餐" for slot in day["time_slots"])
+    lunch = next(slot for slot in day["time_slots"] if slot["activity_name"] == "午餐")
+    dinner = next(slot for slot in day["time_slots"] if slot["activity_name"] == "晚餐")
+    assert lunch["start_time"] == "13:00"
+    assert lunch["end_time"] == "14:00"
+    assert dinner["start_time"] == "17:00"
+    assert dinner["end_time"] == "18:00"
+
+
+def test_visit_that_covers_lunch_eats_first():
+    nodes = _nodes_with_fixed_route(10)
+    day = {
+        "day_index": 0,
+        "meals": [
+            {"type": "lunch", "name": "南翔馒头店", "address": "豫园路"},
+            {"type": "dinner", "name": "老正兴", "address": "福州路"},
+        ],
+        "attractions": [
+            {"name": "上午街", "visit_duration": 90},
+            {"name": "豫园", "visit_duration": 120},
+        ],
+    }
+    nodes._schedule_day_clock(day, "上海", "公共交通")
+    lunch = next(slot for slot in day["time_slots"] if slot["activity_name"] == "南翔馒头店")
+    garden = next(slot for slot in day["time_slots"] if slot["activity_name"] == "豫园")
+    dinner = next(slot for slot in day["time_slots"] if slot["activity_name"] == "老正兴")
+    assert lunch["start_time"] == "11:30"
+    assert lunch["end_time"] == "12:30"
+    assert garden["start_time"] == "12:50"
+    assert garden["end_time"] == "14:50"
+    assert dinner["start_time"] == "17:00"
+    assert dinner["end_time"] == "18:00"
+
+
+def test_adjacent_places_are_a_five_minute_walk():
+    nodes = GraphNodes.__new__(GraphNodes)
+    nodes.logger = None
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("直线距离很近时不应再请求高德")
+
+    nodes.amap_service = type("Amap", (), {"route_direction": staticmethod(explode)})()
+    segments = nodes._generate_route_segments_from_attractions(
+        [
+            {"name": "上海城隍庙", "location": "121.492000,31.226000"},
+            {"name": "上海豫园", "location": "121.492300,31.227200"},
+        ],
+        city="上海",
+        transportation="公共交通",
+    )
+    assert segments[0]["transport_mode"] == "步行"
+    assert segments[0]["duration"] == 5
+    assert 0 < segments[0]["distance"] < 500
 
 
 def test_hotel_legs_bookend_the_day():

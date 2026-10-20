@@ -68,6 +68,7 @@ class TripState(TypedDict, total=False):
     travel_days: int
     transportation: str
     accommodation: str
+    hotel_budget: str
     preferences: List[str]
     user_id: str
     free_text_input: str
@@ -81,8 +82,12 @@ class TripState(TypedDict, total=False):
 
     # 子图结果
     attraction_response: str
+    attraction_candidates: List[Dict[str, Any]]
     weather_response: str
     hotel_response: str
+    hotel_candidates: List[Dict[str, Any]]
+    restaurant_candidates: List[Dict[str, Any]]
+    restaurant_response: str
 
     # 天气节点字段（与 WeatherState 共享）
     # start_date, end_date, weather_response, city 已定义

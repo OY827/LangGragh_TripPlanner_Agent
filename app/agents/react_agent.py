@@ -127,6 +127,34 @@ class ReActAgent:
                     return text
         return ""
 
+    def _trace_react(self, result: dict) -> str:
+        """把每一轮的工具调用和工具返回整理成可读文本。"""
+        messages = result.get("messages") or []
+        lines = []
+        step = 0
+        for message in messages:
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if tool_calls:
+                thought = _message_text(getattr(message, "content", "")).strip()
+                for call in tool_calls:
+                    step += 1
+                    args = call.get("args") if isinstance(call, dict) else {}
+                    name = call.get("name") if isinstance(call, dict) else ""
+                    lines.append(f"[ReAct] 第{step}轮")
+                    if thought:
+                        lines.append(f"  模型说明: {thought[:400]}")
+                        thought = ""
+                    lines.append(
+                        f"  调用 {name} {json.dumps(args or {}, ensure_ascii=False)}"
+                    )
+                continue
+            if getattr(message, "type", "") == "tool":
+                content = _message_text(getattr(message, "content", "")).strip()
+                if len(content) > 800:
+                    content = content[:800] + "…"
+                lines.append(f"  工具返回: {content}")
+        return "\n".join(lines)
+
     def run(self, query: str) -> str:
         """执行工具循环，返回最终文本或结构化结果的 JSON。"""
         if self.verbose:
@@ -153,12 +181,23 @@ class ReActAgent:
                 config={"recursion_limit": self._recursion_limit()},
             )
             text = self._result_text(result if isinstance(result, dict) else {})
+            trace = self._trace_react(result if isinstance(result, dict) else {})
+            if trace:
+                print(trace)
             if self.verbose:
                 print(f"\n{'='*60}")
                 print(f"最终答案：{text}")
                 print(f"{'='*60}\n")
             if self.enable_monitoring:
                 self._metrics.increment_success()
+                if trace:
+                    self._logger.log_agent_step(
+                        agent_name=self.name,
+                        step="graph",
+                        action="trace",
+                        input_data=query,
+                        output_data=trace,
+                    )
                 self._logger.log_agent_step(
                     agent_name=self.name,
                     step="graph",

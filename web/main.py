@@ -31,7 +31,7 @@ from app.models.schemas import (
     DialogChatRequest, DialogChatResponse,
     normalize_trip_plan_day_indices,
 )
-from app.agents.langgraph_builder import get_langgraph_agent
+from app.orchestrator import get_langgraph_agent
 from app.agents.dialog_agent import DialogAgent
 from app.agents.version_manager import VersionManager
 from app.services.amap_service import AmapService
@@ -161,6 +161,9 @@ def graph_result_to_trip_plan(result: dict, request: TripRequest) -> Optional[Tr
     data.setdefault("days", [])
     data.setdefault("weather_info", [])
     data.setdefault("overall_suggestions", data.get("overall_suggestions") or "")
+    data.setdefault("introduction", data.get("introduction") or "")
+    data.setdefault("price_checks", data.get("price_checks") or [])
+    data.setdefault("hotel_options", data.get("hotel_options") or [])
 
     for i, day in enumerate(data.get("days") or []):
         if not isinstance(day, dict):
@@ -301,6 +304,7 @@ async def generate_trip_plan(request: TripRequest, background_tasks: BackgroundT
             end_date=request.end_date,
             transportation=request.transportation,
             accommodation=request.accommodation,
+            hotel_budget=request.hotel_budget or "",
             preferences=request.preferences or [],
             user_id=request.user_id or "",
             free_text_input=request.free_text_input or "",
@@ -315,6 +319,7 @@ async def generate_trip_plan(request: TripRequest, background_tasks: BackgroundT
                 thread_id=result.get("thread_id") or None,
                 session_id=result.get("session_id") or None,
                 welcome_message=result.get("dialog_reply") or None,
+                llm_usage=result.get("llm_usage") or None,
             )
         return TripPlanResponse(
             success=False,
@@ -607,6 +612,7 @@ async def dialog_chat(request: DialogChatRequest):
             trip_plan=trip_plan,
             changes=result.get("dialog_changes") or [],
             new_version_id=result.get("current_version_id") or None,
+            llm_usage=result.get("llm_usage") or None,
         )
     except HTTPException:
         raise

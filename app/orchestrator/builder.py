@@ -1,15 +1,7 @@
-"""
-LangGraph 构建器 - 构建主图
+"""编排层：只决定主图怎么连、按什么顺序跑。
 
-架构：
-- 知识库检索、高德景点、天气、酒店四路同时出发
-- 合并节点只等知识库和高德，route 再等合并结果、天气和酒店
-- 只调用一次规划模型；反思不通过时重生成行程
-
-并行阶段：
-1. 主图 fan-out 四个异步节点，通过 ainvoke 同一步并发调度
-2. 各节点在线程池中执行同步 I/O，避免阻塞事件循环
-3. 仅回写各自专属字段，避免同一步并发写冲突
+景点、天气、酒店、规划、排程这些具体工作仍在 app.agents。
+流程是推荐、天气、酒店三路同时出发，到齐后规划；反思不通过时只重生成行程。
 """
 
 from __future__ import annotations
@@ -23,8 +15,8 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
-from .langgraph_state import TripState
-from .langgraph_nodes import GraphNodes
+from app.agents.langgraph_nodes import GraphNodes
+from app.agents.langgraph_state import TripState
 
 
 def build_redis_url(
@@ -78,8 +70,12 @@ class LangGraphBuilder:
         return await asyncio.to_thread(self.nodes.retrieve_knowledge, state)
 
     async def _run_amap(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """高德景点搜索。"""
+        """调试用的高德搜索。主图景点推荐走 recommend，不走这里。"""
         return await asyncio.to_thread(self.nodes.search_amap, state)
+
+    async def _run_recommend(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """景点推荐智能体：按偏好反复搜高德，再补介绍和门票。"""
+        return await asyncio.to_thread(self.nodes.recommend_attractions, state)
 
     # ==================== 天气 / 酒店节点 ====================
 
@@ -101,6 +97,7 @@ class LangGraphBuilder:
             {
                 "city": state.get("city", ""),
                 "accommodation": state.get("accommodation", ""),
+                "hotel_budget": state.get("hotel_budget", ""),
                 "start_date": state.get("start_date", ""),
                 "travel_days": state.get("travel_days", 1),
             },
@@ -134,8 +131,8 @@ class LangGraphBuilder:
             elif isinstance(result, dict):
                 merged.update(result)
 
-        if not isinstance(retrieve_result, Exception) and not isinstance(amap_result, Exception):
-            merged.update(self.nodes.merge_attraction_results({**state, **merged}))
+        if not isinstance(amap_result, Exception):
+            merged.update(self.nodes.select_and_enrich({**state, **merged}))
 
         return merged
 
@@ -146,11 +143,10 @@ class LangGraphBuilder:
 
         流程：
             init → memory → prepare
-                 ├─ retrieve ─┐
-                 ├─ search_amap ┴→ merge ─┐
-                 ├─ weather              ├→ route → plan → reflect
-                 └─ hotels ──────────────┘
-            反思不通过时只重新生成行程，不重跑检索。
+                 ├─ recommend（ReAct 反复调高德并按偏好点名）─┐
+                 ├─ weather                                   ├→ plan → reflect
+                 └─ hotels ───────────────────────────────────┘
+            规划节点先排好每一天，再调用路线工具按这个顺序算距离。
         """
         graph = StateGraph(TripState)
 
@@ -158,13 +154,10 @@ class LangGraphBuilder:
         graph.add_node("memory", self.nodes.query_memory)
         graph.add_node("build_attraction_query", self.nodes.build_attraction_query)
 
-        graph.add_node("retrieve", self._run_retrieve)
-        graph.add_node("search_amap", self._run_amap)
+        graph.add_node("recommend", self._run_recommend)
         graph.add_node("weather", self._run_weather)
         graph.add_node("hotels", self._run_hotels)
-        graph.add_node("merge", self.nodes.merge_attraction_results)
 
-        graph.add_node("route", self.nodes.plan_routes)
         graph.add_node("plan", self.nodes.generate_trip_plan)
         graph.add_node("reflect", self.nodes.reflect_trip_plan)
         graph.add_node("save", self.nodes.save_trip_plan)
@@ -177,18 +170,13 @@ class LangGraphBuilder:
         graph.add_edge("init", "memory")
         graph.add_edge("memory", "build_attraction_query")
 
-        graph.add_edge("build_attraction_query", "retrieve")
-        graph.add_edge("build_attraction_query", "search_amap")
+        graph.add_edge("build_attraction_query", "recommend")
         graph.add_edge("build_attraction_query", "weather")
         graph.add_edge("build_attraction_query", "hotels")
 
-        graph.add_edge("retrieve", "merge")
-        graph.add_edge("search_amap", "merge")
-
-        graph.add_edge("merge", "route")
-        graph.add_edge("weather", "route")
-        graph.add_edge("hotels", "route")
-        graph.add_edge("route", "plan")
+        graph.add_edge("recommend", "plan")
+        graph.add_edge("weather", "plan")
+        graph.add_edge("hotels", "plan")
         graph.add_edge("plan", "reflect")
 
         graph.add_conditional_edges(
@@ -327,6 +315,7 @@ class TripPlannerAgent:
         preferences: list,
         user_id: str,
         free_text_input: str,
+        hotel_budget: str = "",
     ) -> Dict[str, Any]:
         from datetime import datetime, timedelta
 
@@ -344,6 +333,7 @@ class TripPlannerAgent:
             "travel_days": travel_days,
             "transportation": transportation,
             "accommodation": accommodation,
+            "hotel_budget": hotel_budget or "",
             "preferences": preferences or [],
             "user_id": user_id,
             "free_text_input": free_text_input,
@@ -362,6 +352,7 @@ class TripPlannerAgent:
         preferences: list = None,
         user_id: str = "",
         free_text_input: str = "",
+        hotel_budget: str = "",
         thread_id: str = None,
     ) -> Dict[str, Any]:
         """异步规划旅行（并行子图通过 ainvoke 真正并发）"""
@@ -370,7 +361,7 @@ class TripPlannerAgent:
         input_state = self._build_input_state(
             city, travel_days, start_date, end_date,
             transportation, accommodation, preferences or [],
-            user_id, free_text_input,
+            user_id, free_text_input, hotel_budget,
         )
 
         thread_id = self._ensure_thread_id(thread_id)
@@ -389,8 +380,13 @@ class TripPlannerAgent:
             },
         )
 
+        from app.monitoring.token_usage import track_llm_usage
+
         try:
-            result = await self.app.ainvoke(input_state, config)
+            with track_llm_usage() as usage:
+                result = await self.app.ainvoke(input_state, config)
+                if isinstance(result, dict):
+                    result["llm_usage"] = dict(usage)
         except Exception as e:
             print(f"❌ 图异步执行失败: {e}")
             import traceback
@@ -414,6 +410,7 @@ class TripPlannerAgent:
         preferences: list = None,
         user_id: str = "",
         free_text_input: str = "",
+        hotel_budget: str = "",
         thread_id: str = None,
     ) -> Dict[str, Any]:
         """同步入口：内部走异步并发执行"""
@@ -427,6 +424,7 @@ class TripPlannerAgent:
             preferences=preferences,
             user_id=user_id,
             free_text_input=free_text_input,
+            hotel_budget=hotel_budget,
             thread_id=thread_id,
         )
 
@@ -475,8 +473,11 @@ class TripPlannerAgent:
             "trip_plan": result.get("trip_plan", ""),
             "trip_plan_parsed": result.get("trip_plan_parsed"),
             "attraction_response": result.get("attraction_response", ""),
+            "attraction_candidates": result.get("attraction_candidates") or [],
+            "restaurant_candidates": result.get("restaurant_candidates") or [],
             "weather_response": result.get("weather_response", ""),
             "hotel_response": result.get("hotel_response", ""),
+            "hotel_candidates": result.get("hotel_candidates") or [],
             "reflection_feedback": result.get("reflection_feedback", ""),
             "iteration_count": result.get("iteration_count", 0),
             "budget": result.get("budget"),
@@ -489,6 +490,7 @@ class TripPlannerAgent:
             "dialog_changes": result.get("dialog_changes") or [],
             "dialog_active": bool(result.get("dialog_active")),
             "awaiting_input": paused is not None,
+            "llm_usage": result.get("llm_usage") or {},
         }
 
     def get_state_history(self, thread_id: str) -> list:
@@ -520,8 +522,13 @@ class TripPlannerAgent:
             thread_id=thread_id,
             tags=["langgraph", "dialog"],
         )
+        from app.monitoring.token_usage import track_llm_usage
+
         try:
-            result = await self.app.ainvoke(Command(resume=user_text), config)
+            with track_llm_usage() as usage:
+                result = await self.app.ainvoke(Command(resume=user_text), config)
+                if isinstance(result, dict):
+                    result["llm_usage"] = dict(usage)
         except Exception as e:
             print(f"❌ 对话恢复失败: {e}")
             return {"error": str(e), "thread_id": thread_id}

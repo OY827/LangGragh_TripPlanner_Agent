@@ -130,16 +130,9 @@ def test_planner_grounding_prompt():
     assert "候选约束" in planner_md or "禁止编造" in planner_md
     print("  ✓ planner.md 含候选约束")
 
-    from app.agents.trip_planner_agent import MultiAgentTripPlanner
-    from app.models.schemas import TripRequest
-
-    # 不完整初始化，只测 query 构建方法：直接实例化会很重，改为读源码或轻量调用
-    src = Path("app/agents/trip_planner_agent.py").read_text(encoding="utf-8")
-    assert "禁止编造未出现的景点" in src
-    print("  ✓ MultiAgent planner query 含 grounding 约束")
-
-    nodes_src = Path("app/agents/langgraph_nodes.py").read_text(encoding="utf-8")
-    assert "禁止编造未列出的景点" in nodes_src
+    planner_src = Path("app/agents/planner.py").read_text(encoding="utf-8")
+    assert "不要编造候选里没有的景点" in planner_src
+    assert "只能从上方「景点候选」中选择" in planner_src
     print("  ✓ LangGraph planner message 含 grounding 约束")
 
 
